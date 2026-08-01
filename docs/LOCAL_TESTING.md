@@ -160,3 +160,11 @@ kubectl get changewindow chg0012345 -n gitops-fleet -o yaml
 # 3. Stream live operator logs from Docker Desktop
 kubectl logs -f deployment/controller-manager -c manager -n gitops-fleet
 ```
+
+---
+
+## Step 6: Local Kafka CHG Event Simulation
+
+To test Kafka ingestion (`gitops.chg.events`) and emission (`gitops.change.validation`) without needing a fully deployed Central SRE Agent, refer to the step-by-step simulation guide:
+
+- **[SIMULATE_CHG_TESTING.md](SIMULATE_CHG_TESTING.md)** — Step-by-step local Kafka event producer/consumer testing with CLI tools (`kcat`) and Python scripts.

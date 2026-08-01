@@ -40,6 +40,7 @@ drift-operator/
 │   ├── DISCONNECTED_DEPLOYMENT.md # Air-gapped Baremetal OpenShift Guide
 │   ├── KAFKA_INTEGRATION.md       # Kafka Topics & Security Integration Guide
 │   ├── LOCAL_TESTING.md           # Local Kubernetes & Dev Testing Guide
+│   ├── SIMULATE_CHG_TESTING.md    # Local Kafka CHG Event Simulation Guide
 │   ├── SRE_AGENT_ARCHITECTURE.md  # Central Agent Topology & LangGraph Workflow
 │   └── TEAMS_INTEGRATION.md       # MS Teams Adaptive Cards & Webhook Guide
 ├── Dockerfile                     # Multi-stage OpenShift-compliant Container Build
@@ -75,6 +76,7 @@ drift-operator/
 
 - **[TEAMS_INTEGRATION.md](docs/TEAMS_INTEGRATION.md)** — MS Teams Incoming Webhook setup, Adaptive Cards v1.4 schema, and Nexus Raw log evidence buttons.
 - **[SRE_AGENT_ARCHITECTURE.md](docs/SRE_AGENT_ARCHITECTURE.md)** — Autonomous Central SRE Agent design, GitHub PR/Tag API integration, embedded DB caching, & LangGraph state graph.
+- **[SIMULATE_CHG_TESTING.md](docs/SIMULATE_CHG_TESTING.md)** — Step-by-step local Kafka event simulation (`gitops.chg.events` $\rightarrow$ `ChangeWindow` $\rightarrow$ `gitops.change.validation`).
 - **[LOCAL_TESTING.md](docs/LOCAL_TESTING.md)** — Step-by-step local testing guide using Docker Desktop Kubernetes & `make run`.
 - **[DISCONNECTED_DEPLOYMENT.md](docs/DISCONNECTED_DEPLOYMENT.md)** — Step-by-step air-gapped baremetal OpenShift deployment, internal Nexus image mirroring, Nexus Raw log evidence, & restricted-v2 SCC guide.
 - **[KAFKA_INTEGRATION.md](docs/KAFKA_INTEGRATION.md)** — Ingestion & emission Kafka topics, TLS/mTLS certificate (CN validation) setup, and JSON event schemas.
