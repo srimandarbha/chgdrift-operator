@@ -1,0 +1,53 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: propagationstatuses.gitops.example.com
+spec:
+  group: gitops.example.com
+  scope: Namespaced
+  names:
+    kind: PropagationStatus
+    listKind: PropagationStatusList
+    plural: propagationstatuses
+    singular: propagationstatus
+    shortNames: ["propstat"]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Expected
+          type: string
+          jsonPath: .spec.expectedRevision
+        - name: Diverged
+          type: string
+          jsonPath: .status.divergedClusters
+        - name: Lagging
+          type: string
+          jsonPath: .status.laggingClusters
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["appName", "expectedRevision", "targetClusters"]
+              properties:
+                appName: { type: string }
+                expectedRevision: { type: string }
+                targetClusters:
+                  type: array
+                  items: { type: string }
+                lagThresholdSeconds: { type: integer, default: 600 }
+                staleReportThresholdSeconds: { type: integer, default: 900 }
+                parentApp: { type: string }
+                rootApp: { type: string }
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

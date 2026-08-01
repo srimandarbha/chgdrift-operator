@@ -1,0 +1,59 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gitops-propagation-alerts
+  namespace: gitops-fleet
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: gitops-propagation.rules
+      rules:
+        - alert: GitOpsClusterDiverged
+          expr: gitops_propagation_cluster_state{state="Diverged"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.cluster }} has drifted for app {{ $labels.app }}"
+            description: >
+              Local sync status is OutOfSync on {{ $labels.cluster }}.
+              Something changed outside git on this cluster -- check for
+              manual kubectl edits or a failed local reconcile.
+
+        - alert: GitOpsPropagationFleetWideDivergence
+          expr: count by (app) (gitops_propagation_cluster_state{state="Diverged"} == 1) >= 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $value }} clusters diverged simultaneously for app {{ $labels.app }}"
+            description: >
+              Simultaneous divergence across several clusters points to a
+              systemic cause rather than one-off manual edits -- check the
+              last merged commit and any fleet-wide policy/webhook changes.
+
+        - alert: GitOpsPropagationLagging
+          expr: gitops_propagation_lag_seconds > 600
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.cluster }} is behind on app {{ $labels.app }}"
+            description: >
+              {{ $labels.cluster }} has not converged on the expected
+              revision for {{ $value | humanizeDuration }}. If this is an
+              intentional staged rollout, tune lagThresholdSeconds instead
+              of silencing this.
+
+        - alert: GitOpsAgentReportStale
+          expr: gitops_propagation_report_age_seconds > 900
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Agent on {{ $labels.cluster }} hasn't reported in 15m+"
+            description: >
+              No fresh ClusterAppReport from {{ $labels.cluster }} for app
+              {{ $labels.app }}. Check agent connectivity/health before
+              assuming the underlying app has drifted.

@@ -1,0 +1,59 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: drift-operator-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - gitops.example.com
+  resources:
+  - clusterappreports
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - gitops.example.com
+  resources:
+  - propagationstatuses
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - gitops.example.com
+  resources:
+  - propagationstatuses/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - gitops.example.com
+  resources:
+  - changewindows
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - gitops.example.com
+  resources:
+  - changewindows/status
+  verbs:
+  - get
+  - update
+  - patch

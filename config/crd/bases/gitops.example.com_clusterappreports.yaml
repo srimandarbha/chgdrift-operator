@@ -1,0 +1,54 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clusterappreports.gitops.example.com
+spec:
+  group: gitops.example.com
+  scope: Namespaced
+  names:
+    kind: ClusterAppReport
+    listKind: ClusterAppReportList
+    plural: clusterappreports
+    singular: clusterappreport
+    shortNames: ["car"]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: App
+          type: string
+          jsonPath: .spec.appName
+        - name: Revision
+          type: string
+          jsonPath: .spec.observedRevision
+        - name: Sync
+          type: string
+          jsonPath: .spec.syncStatus
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["clusterName", "appName", "observedRevision", "observedAt"]
+              properties:
+                clusterName: { type: string }
+                appName: { type: string }
+                observedRevision: { type: string }
+                syncStatus:
+                  type: string
+                  enum: ["Synced", "OutOfSync", "Unknown"]
+                health:
+                  type: string
+                  enum: ["Healthy", "Progressing", "Degraded", "Unknown"]
+                observedAt:
+                  type: string
+                  format: date-time

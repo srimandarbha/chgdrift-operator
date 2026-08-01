@@ -1,0 +1,31 @@
+domain: gitops.example.com
+layout:
+- go.kubebuilder.io/v4
+projectName: drift-operator
+repo: example.com/drift-operator
+version: "3"
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: gitops.example.com
+  group: gitops
+  kind: ClusterAppReport
+  path: example.com/drift-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: gitops.example.com
+  group: gitops
+  kind: PropagationStatus
+  path: example.com/drift-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: gitops.example.com
+  group: gitops
+  kind: ChangeWindow
+  path: example.com/drift-operator/api/v1alpha1
+  version: v1alpha1
