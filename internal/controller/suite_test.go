@@ -16,7 +16,6 @@ import (
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 )
 
-
 // psNamespacedName returns the NamespacedName for a PropagationStatus.
 // Go does not allow attaching methods to types from external packages, so we
 // use a package-level helper instead of a method receiver.
@@ -63,6 +62,7 @@ func TestPropagationStatusController(t *testing.T) {
 		Spec: gitopsv1alpha1.ClusterAppReportSpec{
 			ClusterName:      "us-east-01",
 			AppName:          "svc-payments",
+			AppNamespace:     "payments-prod",
 			ObservedRevision: "a1b2c3d9",
 			SyncStatus:       "Synced",
 			Health:           "Healthy",
@@ -109,8 +109,11 @@ func TestPropagationStatusController(t *testing.T) {
 	if len(updatedPS.Status.MissingClusters) != 1 || updatedPS.Status.MissingClusters[0] != "us-east-02" {
 		t.Errorf("expected us-east-02 to be missing, got missing=%v", updatedPS.Status.MissingClusters)
 	}
-}
 
+	if len(updatedPS.Status.ClusterStates) == 0 || updatedPS.Status.ClusterStates[0].AppNamespace != "payments-prod" {
+		t.Errorf("expected cluster state appNamespace 'payments-prod', got %s", updatedPS.Status.ClusterStates[0].AppNamespace)
+	}
+}
 
 func TestChangeWindowSilenceClassification(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -190,5 +193,96 @@ func TestChangeWindowSilenceClassification(t *testing.T) {
 	silenceDuring := r.classifySilence("svc-payments", csWentSilent, chg, now, 300*time.Second)
 	if silenceDuring.State != "WentSilentDuringChg" {
 		t.Errorf("expected state WentSilentDuringChg, got %s", silenceDuring.State)
+	}
+}
+
+func TestChangeWindowReconcile(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	now := time.Now()
+	startTime := metav1.NewTime(now.Add(-10 * time.Minute))
+	endTime := metav1.NewTime(now.Add(50 * time.Minute))
+
+	chg := &gitopsv1alpha1.ChangeWindow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chg-100",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.ChangeWindowSpec{
+			CHGNumber:        "CHG-100",
+			ReleaseTag:       "v1.0.0",
+			ExpectedRevision: "rev-100",
+			RootApp:          "app-root",
+			ImpactedApps:     []string{"svc-payments"},
+			StartTime:        startTime,
+			EndTime:          endTime,
+		},
+	}
+
+	ps := &gitopsv1alpha1.PropagationStatus{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "svc-payments",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.PropagationStatusSpec{
+			AppName:          "svc-payments",
+			ExpectedRevision: "rev-100",
+			TargetClusters:   []string{"us-east-01"},
+		},
+		Status: gitopsv1alpha1.PropagationStatusStatus{
+			Phase: "Synced",
+			ClusterStates: []gitopsv1alpha1.ClusterRevisionState{
+				{
+					ClusterName:      "us-east-01",
+					ObservedRevision: "rev-100",
+					SyncStatus:       "Synced",
+					Health:           "Healthy",
+					ObservedAt:       metav1.NewTime(now.Add(-1 * time.Minute)),
+					State:            "InSync",
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(chg, ps).
+		WithStatusSubresource(chg, ps).
+		WithIndex(&gitopsv1alpha1.PropagationStatus{}, "spec.appName", func(obj client.Object) []string {
+			p, ok := obj.(*gitopsv1alpha1.PropagationStatus)
+			if !ok || p.Spec.AppName == "" {
+				return nil
+			}
+			return []string{p.Spec.AppName}
+		}).
+		Build()
+
+	r := &ChangeWindowReconciler{
+		Client: fakeClient,
+	}
+
+	req := ctrlRequest("default", "chg-100")
+	ctx := context.Background()
+
+	res, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("expected requeueAfter 0s for Validated window, got %v", res.RequeueAfter)
+	}
+
+	var updatedCHG gitopsv1alpha1.ChangeWindow
+	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "chg-100"}, &updatedCHG); err != nil {
+		t.Fatalf("failed to fetch updated ChangeWindow: %v", err)
+	}
+
+	if !updatedCHG.Status.Validation.Passed {
+		t.Errorf("expected validation.Passed to be true, got false; issues: %v", updatedCHG.Status.Validation.IssuesFound)
+	}
+	if updatedCHG.Status.Phase != "Validated" {
+		t.Errorf("expected phase Validated, got %s", updatedCHG.Status.Phase)
 	}
 }

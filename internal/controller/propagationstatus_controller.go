@@ -63,7 +63,7 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	originalStatus := ps.Status.DeepCopy()
+	original := ps.DeepCopy()
 	previousPhase := ps.Status.Phase
 
 	// Reset lag clock if expected revision moved
@@ -140,6 +140,7 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 		states = append(states, gitopsv1alpha1.ClusterRevisionState{
 			ClusterName:      clusterName,
+			AppNamespace:     rep.Spec.AppNamespace,
 			ObservedRevision: rep.Spec.ObservedRevision,
 			SyncStatus:       rep.Spec.SyncStatus,
 			Health:           rep.Spec.Health,
@@ -168,7 +169,7 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	emitTransitionEvent(r.Recorder, &ps, previousPhase, diverged, lagging, stale, missing)
 
 	// Rule 4: Patch status independently of spec using MergeFrom
-	if err := r.Status().Patch(ctx, &ps, client.MergeFrom(&gitopsv1alpha1.PropagationStatus{Status: *originalStatus})); err != nil {
+	if err := r.Status().Patch(ctx, &ps, client.MergeFrom(original)); err != nil {
 		if apierrors.IsConflict(err) {
 			// Rule 2: Conflict error - retry immediately
 			return ctrl.Result{Requeue: true}, nil
@@ -237,6 +238,20 @@ func (r *PropagationStatusReconciler) mapReportToPropagationStatus(ctx context.C
 	if !ok || rep.Spec.AppName == "" {
 		return nil
 	}
+	var psList gitopsv1alpha1.PropagationStatusList
+	if err := r.List(ctx, &psList, client.InNamespace(rep.Namespace), client.MatchingFields{"spec.appName": rep.Spec.AppName}); err == nil && len(psList.Items) > 0 {
+		var reqs []ctrl.Request
+		for _, ps := range psList.Items {
+			reqs = append(reqs, ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: ps.Namespace,
+					Name:      ps.Name,
+				},
+			})
+		}
+		return reqs
+	}
+
 	return []ctrl.Request{{
 		NamespacedName: types.NamespacedName{
 			Namespace: rep.Namespace,
@@ -255,6 +270,16 @@ func (r *PropagationStatusReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return []string{report.Spec.AppName}
 	}); err != nil {
 		return fmt.Errorf("indexing spec.appName: %w", err)
+	}
+
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &gitopsv1alpha1.PropagationStatus{}, "spec.appName", func(rawObj client.Object) []string {
+		ps, ok := rawObj.(*gitopsv1alpha1.PropagationStatus)
+		if !ok || ps.Spec.AppName == "" {
+			return nil
+		}
+		return []string{ps.Spec.AppName}
+	}); err != nil {
+		return fmt.Errorf("indexing PropagationStatus spec.appName: %w", err)
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).

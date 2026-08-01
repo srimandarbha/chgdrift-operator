@@ -110,6 +110,7 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	spec := gitopsv1alpha1.ClusterAppReportSpec{
 		ClusterName:      r.ClusterName,
 		AppName:          desc.AppName,
+		AppNamespace:     desc.Namespace,
 		ObservedRevision: desc.Revision,
 		SyncStatus:       desc.SyncStatus,
 		Health:           desc.Health,
@@ -378,12 +379,36 @@ func (r *LocalAppWatchReconciler) checkVMHealth(ctx context.Context, namespace, 
 		// DataVolume binding: check all volumes that reference a DataVolume.
 		status.DataVolumesBound = r.allDataVolumesBound(ctx, namespace, &vmObj)
 
+		// VirtualMachineSnapshot readiness check.
+		status.SnapshotReady = r.isVMSnapshotReady(ctx, namespace, vmName)
+
 		// In-flight live migration for this VMI.
 		status.ActiveMigration = r.findActiveMigration(ctx, namespace, vmName)
 
 		results = append(results, status)
 	}
 	return results
+}
+
+// isVMSnapshotReady checks whether any VirtualMachineSnapshot referencing this VM is readyToUse.
+func (r *LocalAppWatchReconciler) isVMSnapshotReady(ctx context.Context, namespace, vmName string) bool {
+	snapList := &unstructured.UnstructuredList{}
+	snapList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "snapshot.kubevirt.io",
+		Version: "v1alpha1",
+		Kind:    "VirtualMachineSnapshotList",
+	})
+	if err := r.List(ctx, snapList, client.InNamespace(namespace)); err != nil {
+		return true // Optional check; assume true if CRD is not present
+	}
+	for _, snap := range snapList.Items {
+		specVM, _, _ := unstructured.NestedString(snap.Object, "spec", "source", "name")
+		if specVM == vmName {
+			readyToUse, _, _ := unstructured.NestedBool(snap.Object, "status", "readyToUse")
+			return readyToUse
+		}
+	}
+	return true
 }
 
 // hasUnstructuredCondition returns true when the object's status.conditions array

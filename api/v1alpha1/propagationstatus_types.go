@@ -62,6 +62,8 @@ type VMHealthStatus struct {
 	RestartRequired bool `json:"restartRequired"`
 	// DataVolumesBound is true when all referenced DataVolumes have phase == Succeeded.
 	DataVolumesBound bool `json:"dataVolumesBound"`
+	// SnapshotReady is true when any referenced VirtualMachineSnapshot has status.readyToUse == true.
+	SnapshotReady bool `json:"snapshotReady,omitempty"`
 	// ActiveMigration is the name of any in-flight VirtualMachineInstanceMigration, empty otherwise.
 	ActiveMigration string `json:"activeMigration,omitempty"`
 }
@@ -81,6 +83,9 @@ type ClusterAppReportSpec struct {
 
 	// AppName ties this report to a PropagationStatus.spec.appName.
 	AppName string `json:"appName"`
+
+	// AppNamespace is the target workload namespace on the spoke cluster.
+	AppNamespace string `json:"appNamespace,omitempty"`
 
 	// ObservedRevision is the git commit SHA currently synced locally.
 	ObservedRevision string `json:"observedRevision"`
@@ -148,6 +153,7 @@ type ClusterAppReportList struct {
 
 type PropagationStatusSpec struct {
 	AppName                     string   `json:"appName"`
+	AppNamespace                string   `json:"appNamespace,omitempty"`
 	ExpectedRevision            string   `json:"expectedRevision"`
 	TargetClusters              []string `json:"targetClusters"`
 	LagThresholdSeconds         int32    `json:"lagThresholdSeconds,omitempty"`
@@ -170,6 +176,7 @@ type MachineConfigPoolStatus struct {
 // ChangeWindowReconciler has a single place to read all per-cluster data.
 type ClusterRevisionState struct {
 	ClusterName            string                  `json:"clusterName"`
+	AppNamespace           string                  `json:"appNamespace,omitempty"`
 	ObservedRevision       string                  `json:"observedRevision,omitempty"`
 	SyncStatus             string                  `json:"syncStatus,omitempty"`
 	Health                 string                  `json:"health,omitempty"`
@@ -250,6 +257,7 @@ type ChangeWindowSpec struct {
 	ExpectedRevision            string            `json:"expectedRevision,omitempty"`
 	RootApp                     string            `json:"rootApp"`
 	ImpactedApps                []string          `json:"impactedApps,omitempty"`
+	TargetNamespaces            []string          `json:"targetNamespaces,omitempty"`
 	StartTime                   metav1.Time       `json:"startTime"`
 	EndTime                     metav1.Time       `json:"endTime"`
 	StaleReportThresholdSeconds int32             `json:"staleReportThresholdSeconds,omitempty"`

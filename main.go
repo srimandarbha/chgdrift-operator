@@ -71,6 +71,7 @@ func main() {
 	// -------------------------------------------------------------------
 	var kafkaBridge *kafka.KafkaBridge
 	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
+		namespace := getenv("OPERATOR_NAMESPACE", "gitops-fleet")
 		cfg := kafka.KafkaConfig{
 			Brokers:          strings.Split(brokers, ","),
 			IngestTopic:      getenv("KAFKA_INGEST_TOPIC", "gitops.chg.events"),
@@ -81,16 +82,16 @@ func main() {
 			ClientKeyPath:    os.Getenv("KAFKA_CLIENT_KEY_FILE"),
 			ServerCN:         os.Getenv("KAFKA_SERVER_CN"),
 		}
-		bridge, err := kafka.NewKafkaBridge(cfg, mgr.GetClient())
+		bridge, err := kafka.NewKafkaBridge(cfg, mgr.GetClient(), namespace)
 		if err != nil {
 			setupLog.Error(err, "failed to initialise Kafka bridge — continuing without Kafka")
 		} else {
 			kafkaBridge = bridge
-			namespace := getenv("OPERATOR_NAMESPACE", "gitops-fleet")
-			// StartConsumer is context-aware and exits cleanly when the manager
-			// stops — no leaked goroutines.
-			bridge.StartConsumer(ctx, namespace)
-			setupLog.Info("Kafka bridge initialised",
+			if err := mgr.Add(bridge); err != nil {
+				setupLog.Error(err, "failed to add Kafka bridge runnable to manager")
+				os.Exit(1)
+			}
+			setupLog.Info("Kafka bridge initialised and registered as leader-elected runnable",
 				"ingestTopic", cfg.IngestTopic,
 				"emitTopic", cfg.EmitTopic,
 				"brokers", cfg.Brokers)

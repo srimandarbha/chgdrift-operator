@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -51,7 +52,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	originalStatus := chg.Status.DeepCopy()
+	original := chg.DeepCopy()
 	now := time.Now()
 
 	// 1. Wait until CHG maintenance window startTime starts
@@ -72,6 +73,16 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// 2. Fetch Latest PropagationStatus for every impacted Application
 	for _, appName := range chg.Spec.ImpactedApps {
+		var psList gitopsv1alpha1.PropagationStatusList
+		if err := r.List(ctx, &psList, client.InNamespace(chg.Namespace), client.MatchingFields{"spec.appName": appName}); err == nil && len(psList.Items) > 0 {
+			ps := psList.Items[0]
+			chg.Status.AppStates[appName] = gitopsv1alpha1.AppClusterStateMap{
+				Phase:         ps.Status.Phase,
+				ClusterStates: ps.Status.ClusterStates,
+			}
+			continue
+		}
+
 		var ps gitopsv1alpha1.PropagationStatus
 		psName := types.NamespacedName{Namespace: chg.Namespace, Name: appName}
 		if err := r.Get(ctx, psName, &ps); err != nil {
@@ -197,7 +208,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Rule 4: Patch status independently using MergeFrom
-	if err := r.Status().Patch(ctx, &chg, client.MergeFrom(&gitopsv1alpha1.ChangeWindow{Status: *originalStatus})); err != nil {
+	if err := r.Status().Patch(ctx, &chg, client.MergeFrom(original)); err != nil {
 		if apierrors.IsConflict(err) {
 			// Rule 2: Conflict retry
 			return ctrl.Result{Requeue: true}, nil
@@ -401,9 +412,44 @@ func (r *ChangeWindowReconciler) BuildKafkaReportJSON(chg *gitopsv1alpha1.Change
 	return json.MarshalIndent(reportMap, "", "  ")
 }
 
+func (r *ChangeWindowReconciler) mapPropagationStatusToChangeWindow(ctx context.Context, obj client.Object) []ctrl.Request {
+	ps, ok := obj.(*gitopsv1alpha1.PropagationStatus)
+	if !ok || ps.Spec.AppName == "" {
+		return nil
+	}
+	var chgList gitopsv1alpha1.ChangeWindowList
+	if err := r.List(ctx, &chgList, client.InNamespace(ps.Namespace), client.MatchingFields{"spec.impactedApps": ps.Spec.AppName}); err != nil {
+		return nil
+	}
+	var reqs []ctrl.Request
+	for _, chg := range chgList.Items {
+		reqs = append(reqs, ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: chg.Namespace,
+				Name:      chg.Name,
+			},
+		})
+	}
+	return reqs
+}
+
 func (r *ChangeWindowReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &gitopsv1alpha1.ChangeWindow{}, "spec.impactedApps", func(rawObj client.Object) []string {
+		chg, ok := rawObj.(*gitopsv1alpha1.ChangeWindow)
+		if !ok {
+			return nil
+		}
+		return chg.Spec.ImpactedApps
+	}); err != nil {
+		return fmt.Errorf("indexing spec.impactedApps: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gitopsv1alpha1.ChangeWindow{}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		Watches(
+			&gitopsv1alpha1.PropagationStatus{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPropagationStatusToChangeWindow),
+		).
 		Complete(r)
 }

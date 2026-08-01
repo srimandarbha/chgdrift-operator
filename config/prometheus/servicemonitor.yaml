@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: drift-operator-metrics-monitor
+  namespace: gitops-fleet
+  labels:
+    control-plane: controller-manager
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http

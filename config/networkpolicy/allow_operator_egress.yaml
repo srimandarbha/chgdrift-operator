@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: drift-operator-egress
+  namespace: gitops-fleet
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+  policyTypes:
+    - Egress
+  egress:
+    # Allow egress to Kubernetes API server
+    - ports:
+        - protocol: TCP
+          port: 6443
+    # Allow egress to internal Kafka brokers
+    - ports:
+        - protocol: TCP
+          port: 9094
+    # Allow DNS resolution
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

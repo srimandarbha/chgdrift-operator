@@ -52,3 +52,13 @@ func RecordClusterMetrics(app, cluster, currentState string, isInSync bool, lagS
 	ClusterLagSecondsGauge.WithLabelValues(app, cluster).Set(lagSeconds)
 	ClusterReportAgeGauge.WithLabelValues(app, cluster).Set(reportAgeSeconds)
 }
+
+// DeleteClusterMetrics removes gauge metrics for a deleted app/cluster combination.
+func DeleteClusterMetrics(app, cluster string) {
+	possibleStates := []string{"InSync", "Propagating", "Lagging", "Diverged", "Stale", "Missing"}
+	for _, st := range possibleStates {
+		ClusterStateGauge.DeleteLabelValues(app, cluster, st)
+	}
+	ClusterLagSecondsGauge.DeleteLabelValues(app, cluster)
+	ClusterReportAgeGauge.DeleteLabelValues(app, cluster)
+}
