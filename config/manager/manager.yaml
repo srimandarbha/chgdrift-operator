@@ -23,6 +23,22 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      # Keep the operator off virtualization-hosting worker nodes.
+      # These nodes need all capacity free during maintenance windows (MCP drains,
+      # live migrations). The operator only needs API server access — it doesn't
+      # benefit from running close to data-plane workloads.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/virt-worker
+                operator: DoesNotExist
+      tolerations:
+        # Allow scheduling on control-plane nodes if needed, but prefer infra.
+        - key: node-role.kubernetes.io/infra
+          operator: Exists
+          effect: NoSchedule
       containers:
       - command:
         - /manager
@@ -58,10 +74,11 @@ spec:
           requests:
             cpu: 100m
             memory: 128Mi
-        env:
-        - name: NEXUS_RAW_REPO_URL
-          value: "https://nexus.company.com:8081/repository/gitops-evidence"
+        # All environment-specific config comes from the ConfigMap — no hand-edits
+        # to this manifest per environment.
         envFrom:
+        - configMapRef:
+            name: drift-operator-config
         - secretRef:
             name: drift-operator-kafka-certs
             optional: true

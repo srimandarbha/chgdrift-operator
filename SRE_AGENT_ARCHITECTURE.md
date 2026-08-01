@@ -1,151 +1,75 @@
-# Centralized SRE Agent & Spoke Operator Architecture
+# Standalone External SRE Agent & Spoke Operator Architecture
 
-This document details the topology where the **SRE Agent runs centrally** on the Hub control plane (with LangGraph, GitHub API, LLM, and SQLite DB), while the **`drift-operator` runs on each spoke cluster** as a native Kubernetes Go operator.
+This document details the architecture where the **Central SRE Agent runs on a dedicated external SRE Platform / Management Node**, completely decoupled from the OpenShift RHACM Hub cluster.
 
 ---
 
-## 1. System Topology Overview
+## 1. System Topology Overview (External Agent Topology)
 
 ```
-                      ┌──────────────────────────────────────────────────────────┐
-                      │              CENTRAL HUB CLUSTER / CONTROL PLANE         │
-                      │                                                          │
-                      │   [ Central SRE Agent ] (LangGraph + LLM + GitHub API)   │
-                      │    - Receives GitHub Webhooks (`main`/`sit` merges)      │
-                      │    - Consumes Kafka CHG Events (`CHG0012345`)           │
-                      │    - Caches PRs & state in SQLite DB                     │
-                      │    - Runs LangGraph AI RCA Engine                        │
-                      └────────────────────────────┬─────────────────────────────┘
-                                                   │
-                ┌──────────────────────────────────┼──────────────────────────────────┐
-                │ (Pushes ChangeWindow CRDs        │ (Relays ClusterAppReports        │
-                │  via RHACM / GitOps)             │  & Diagnostic Logs back)         │
-                ▼                                  ▼                                  ▼
-┌───────────────────────────────┐  ┌───────────────────────────────┐  ┌───────────────────────────────┐
-│ SPOKE CLUSTER 1 (Baremetal)   │  │ SPOKE CLUSTER 2 (Baremetal)   │  │ SPOKE CLUSTER N (Baremetal)   │
-│                               │  │                               │  │                               │
-│ [ drift-operator ] (Go)       │  │ [ drift-operator ] (Go)       │  │ [ drift-operator ] (Go)       │
-│  - Inspects Argo CD Health    │  │  - Inspects Argo CD Health    │  │  - Inspects Argo CD Health    │
-│  - Monitors OpenShift MCP     │  │  - Monitors OpenShift MCP     │  │  - Monitors OpenShift MCP     │
-│  - Tails Pod Logs on Failure  │  │  - Tails Pod Logs on Failure  │  │  - Tails Pod Logs on Failure  │
-└───────────────────────────────┘  └───────────────────────────────┘  └───────────────────────────────┘
+                       ┌─────────────────────────────────────────────────────────────┐
+                       │  DEDICATED EXTERNAL SRE PLATFORM (Standalone VM / App Node) │
+                       │                                                             │
+                       │     [ Central SRE Agent ] (Python / LangGraph AI Engine)    │
+                       │      - Receives GitHub Webhooks (`main`/`sit` merges)       │
+                       │      - Interacts with GitHub REST API (PRs, Tags, Diffs)    │
+                       │      - Consumes Kafka CHG Events (`CHG0012345`)              │
+                       │      - Stores PR & State Cache in Embedded SQLite DB        │
+                       │      - Executes LangGraph LLM Root Cause Analysis           │
+                       │      - Commits Log Evidence to `gitops-evidence-repo`       │
+                       │      - Posts Adaptive Cards directly to MS Teams            │
+                       └──────────────────────────────┬──────────────────────────────┘
+                                                      │
+                                                      │ (Communicates via Shared Kafka Bus)
+                                                      ▼
+                       ┌─────────────────────────────────────────────────────────────┐
+                       │                   SHARED KAFKA BUS                          │
+                       │  - Ingestion: gitops.chg.events                             │
+                       │  - Spoke Telemetry: gitops.spoke.reports                     │
+                       │  - Emission: gitops.change.validation                       │
+                       └──────────────────────────────┬──────────────────────────────┘
+                                                      │
+                    ┌─────────────────────────────────┼─────────────────────────────────┐
+                    ▼                                 ▼                                 ▼
+   ┌────────────────────────────────┐┌────────────────────────────────┐┌────────────────────────────────┐
+   │ SPOKE CLUSTER 1 (Baremetal)    ││ SPOKE CLUSTER 2 (Baremetal)    ││ RHACM HUB CLUSTER              │
+   │ [ drift-operator ] (Go)        ││ [ drift-operator ] (Go)        ││ [ drift-operator ] (Go)        │
+   │  - Inspects Argo CD Health     ││  - Inspects Argo CD Health     ││  - Inspects Local Workloads    │
+   │  - Monitors OpenShift MCP      ││  - Monitors OpenShift MCP      ││  (Treated as just Spoke #3)    │
+   └────────────────────────────────┘└────────────────────────────────┘└────────────────────────────────┘
 ```
 
 ---
 
-## 2. Why This Topology (Central Agent + Spoke Operators) Is Ideal
+## 2. Benefits of Hosting Agent Externally (Not on RHACM Hub)
 
-1. **Security & Credential Isolation**: GitHub API tokens, LLM API keys, and S3 storage keys stay **securely on the Central Hub**. Spoke clusters do not need access to GitHub tokens or LLM credentials.
-2. **Native Edge Performance**: The Go `drift-operator` runs natively on each spoke cluster with zero-latency access to the local Kubernetes API, OpenShift MCO API (`machineconfiguration.openshift.io/v1`), and pod log subresources.
-3. **Heavy AI Workload Offloading**: The Python/LangGraph AI engine and SQLite database run centrally, keeping spoke cluster resource footprints minimal (100 MB RAM).
-
----
-
-## 3. Role of the Central SRE Agent (Hub)
-
-The **Central SRE Agent** is the brain of the system running on the Hub cluster:
-
-* **Inputs**:
-  * **GitHub Webhooks**: Receives `push` events on `main`/`sit` branches when PRs are merged.
-  * **GitHub REST API**: Queries release tags (`v2.4.0`), commit SHAs, PR numbers, titles, authors, and changed file paths (`components/...`).
-  * **Kafka Topic (`gitops.chg.events`)**: Ingests CHG maintenance windows (`CHG0012345`).
-* **Embedded SQLite Database**: Caches GitHub PR metadata to avoid hitting GitHub API rate limits (5,000 req/hr) and checkpoints LangGraph graph states.
-* **LangGraph AI RCA Engine**: When a spoke cluster reports `Degraded` health, the Central Agent pulls the tail pod logs, executes the LangGraph workflow, runs LLM Root Cause Analysis against the merged PR diffs, and synthesizes the final report.
+1. **Zero Dependency on RHACM Hub Availability**: The SRE Agent runs on a dedicated management VM or application node. Upgrading, rebooting, or failing over the RHACM Hub cluster has zero impact on the SRE Agent.
+2. **Centralized Credentials & Zero Secrets on Kubernetes**:
+   * The SRE Agent holds the GitHub Token, LLM API Key, and MS Teams Webhook URL on its external node.
+   * Neither RHACM nor spoke clusters require GitHub tokens or LLM credentials.
+3. **No Heavy Python / LangGraph Workload on OpenShift**:
+   * Keeps Python runtime dependencies, LangGraph AI engine, and SQLite databases off OpenShift cluster nodes, preserving cluster CPU/memory quotas.
 
 ---
 
-## 4. Role of the Local Spoke Operator (`drift-operator`)
+## 3. Communication Channels
 
-The **Local Operator** runs natively on every downstream spoke cluster:
-
-* **Inputs**: Local Kubernetes API (`Argo CD` status) and OpenShift MCO API (`MachineConfigPool`).
-* **Tasks**:
-  1. Reconciles local `ClusterAppReport` objects with `observedRevision`, `syncStatus`, `health`, and `mcpStatus` (`worker`, `virt`).
-  2. Detects local pod failures (`CrashLoopBackOff`, `ImagePullBackOff`).
-  3. Tails 500 lines of pod logs and writes a local `ClusterAppReport` resource.
-  4. Relays status back to the Hub via RHACM (Klusterlet) or direct status sync.
-
----
-
-## 5. Central LangGraph Workflow (Nodes, Edges, & States)
-
-The **Central Agent** runs the following **LangGraph State Graph**:
-
-```
-                    ┌────────────────────────┐
-                    │  FetchGitMetadataNode  │
-                    └───────────┬────────────┘
-                                │
-                                ▼
-                    ┌────────────────────────┐
-                    │  CollectSpokeStateNode │
-                    └───────────┬────────────┘
-                                │
-                  ┌─────────────┴─────────────┐
-                  │ Conditional Edge: Health? │
-                  └──────┬─────────────┬──────┘
-           Healthy / InSync    Degraded / OutOfSync
-                 │                     │
-                 │                     ▼
-                 │         ┌─────────────────────────┐
-                 │         │ FetchDiagnosticLogsNode │
-                 │         └───────────┬─────────────┘
-                 │                     │
-                 │                     ▼
-                 │         ┌─────────────────────────┐
-                 │         │LLMDiagnosticAnalyzerNode│
-                 │         └───────────┬─────────────┘
-                 │                     │
-                 └──────────────┬──────┘
-                                │
-                                ▼
-                    ┌────────────────────────┐
-                    │ EmitValidationReportNode│
-                    └────────────────────────┘
-```
-
-### Central LangGraph State Schema (`CentralAgentState`)
-
-```python
-class CentralAgentState(TypedDict):
-    # Git & CHG Metadata
-    chg_number: str             # e.g., "CHG0012345"
-    git_repo: str
-    target_branch: str          # e.g., "main" or "sit"
-    release_tag: str            # e.g., "v2.4.0"
-    expected_revision: str      # e.g., "a1b2c3d9"
-    merged_prs: List[dict]      # List of PR titles, authors, changed files
-
-    # Spoke Cluster Statuses (Collected from 100+ Spoke Operators)
-    spoke_reports: List[dict]   # List of ClusterAppReport status objects
-    failing_clusters: List[str] # Clusters reporting Degraded or OutOfSync
-
-    # Diagnostic & AI Fields
-    raw_pod_logs: Dict[str, str] # {cluster_app: "tail log string"}
-    llm_rca_summary: str        # 2-line AI RCA summary
-    log_s3_url: str             # S3 log URL pointer
-
-    # Report Output
-    report_emitted: bool
-```
-
-### LangGraph Nodes Explained
-
-1. **`FetchGitMetadataNode`**:
-   * Triggered by GitHub `push` webhook on `main`/`sit`. Queries GitHub API (`/releases/tags/{tag}` and `/commits/{sha}/pulls`), populates `merged_prs` and caches in SQLite DB.
-2. **`CollectSpokeStateNode`**:
-   * Reads `ClusterAppReport` CRDs sent from all Spoke Operators. Checks `syncStatus`, `health`, and OpenShift `mcpStatus`.
-3. **`FetchDiagnosticLogsNode`**:
-   * Triggered *only* if any spoke cluster reports `Degraded` or `OutOfSync`. Fetches tail pod logs captured by the Spoke Operator.
-4. **`LLMDiagnosticAnalyzerNode`**:
-   * Triggered *only* if failures exist. Passes pod logs + merged PR file diffs to LLM prompt:
-     > *"Analyze these pod logs against merged PR #142 changes. Provide a 2-line root cause statement."*
-5. **`EmitValidationReportNode`**:
-   * Publishes the final consolidated validation report to Kafka (`gitops.change.validation`).
+1. **GitHub API / Webhooks**:
+   * GitHub triggers a `push` webhook to the External SRE Agent on `main`/`sit` merges.
+   * The Agent queries GitHub REST API (`/compare` and `/commits/{sha}/pulls`) to extract PR titles, authors, and file diffs.
+2. **Kafka Bus**:
+   * **`gitops.chg.events`**: ServiceNow / CI-CD sends maintenance window events to the Agent.
+   * **`gitops.spoke.reports`**: Spoke Operators (`drift-operator` on Spoke 1, Spoke 2, RHACM) stream local `ClusterAppReport` status snapshots.
+3. **Log Evidence Upload (GitHub REST API)**:
+   * The External Agent commits diagnostic log files directly to `https://github.com/my-org/gitops-evidence-repo` using its local GitHub token.
+4. **Microsoft Teams Webhooks**:
+   * The External Agent posts color-coded MS Teams Adaptive Cards directly to `#sre-alerts`.
 
 ---
 
-## 6. Central Agent Core Pseudocode
+## 4. External Agent LangGraph Workflow & Pseudocode
+
+The **External SRE Agent** executes the following Python LangGraph workflow:
 
 ```python
 import os
@@ -154,11 +78,11 @@ import sqlite3
 import requests
 from langgraph.graph import StateGraph, END
 
-# Initialize Central SQLite Cache
-db = sqlite3.connect("/var/lib/central-agent/cache.db")
+# Initialize Embedded SQLite Cache on External VM
+db = sqlite3.connect("/var/lib/sre-agent/cache.db")
 db.execute("CREATE TABLE IF NOT EXISTS pr_cache (tag TEXT PRIMARY KEY, pr_json TEXT)")
 
-def fetch_git_metadata_node(state: CentralAgentState) -> CentralAgentState:
+def fetch_git_metadata_node(state: dict) -> dict:
     tag = state["release_tag"]
     cursor = db.cursor()
     cursor.execute("SELECT pr_json FROM pr_cache WHERE tag=?", (tag,))
@@ -175,77 +99,78 @@ def fetch_git_metadata_node(state: CentralAgentState) -> CentralAgentState:
         db.commit()
     return state
 
-def collect_spoke_state_node(state: CentralAgentState) -> CentralAgentState:
-    # Read ClusterAppReports from all spoke operators via Hub Kube API
-    reports = hub_k8s_client.list_cluster_app_reports()
+def collect_spoke_telemetry_node(state: dict) -> dict:
+    # Read telemetry messages received from Kafka topic gitops.spoke.reports
+    reports = kafka_consumer.read_spoke_reports(state["chg_number"])
     state["spoke_reports"] = reports
     
     failing = []
     for r in reports:
-        if r["spec"]["health"] == "Degraded" or r["spec"]["syncStatus"] == "OutOfSync":
-            failing.append(r["spec"]["clusterName"])
+        if r["health"] == "Degraded" or r["syncStatus"] == "OutOfSync":
+            failing.append(r["clusterName"])
     state["failing_clusters"] = failing
     return state
 
-def route_health_check(state: CentralAgentState) -> str:
+def route_health_check(state: dict) -> str:
     if len(state["failing_clusters"]) > 0:
         return "diagnose"
-    return "emit_report"
+    return "send_teams_alert"
 
-def fetch_diagnostic_logs_node(state: CentralAgentState) -> CentralAgentState:
-    # Extract logs captured by spoke operators
-    logs = {}
-    for r in state["spoke_reports"]:
-        if r["spec"]["clusterName"] in state["failing_clusters"]:
-            logs[r["spec"]["clusterName"]] = r["spec"].get("tailLogs", [])
-    state["raw_pod_logs"] = logs
-    return state
-
-def llm_diagnostic_analyzer_node(state: CentralAgentState) -> CentralAgentState:
+def llm_diagnostic_analyzer_node(state: dict) -> dict:
     prompt = f"""
     You are an expert SRE. Analyze the error logs from failing spoke clusters against merged PR changes:
     PR Changes: {json.dumps(state['merged_prs'])}
-    Spoke Pod Logs: {json.dumps(state['raw_pod_logs'])}
+    Spoke Pod Logs: {json.dumps(state['spoke_reports'])}
     Provide a concise 2-sentence Root Cause Analysis (RCA).
     """
     summary = llm_client.generate(prompt)
     state["llm_rca_summary"] = summary
     return state
 
-def emit_validation_report_node(state: CentralAgentState) -> CentralAgentState:
-    report_payload = {
-        "chgNumber": state["chg_number"],
-        "releaseTag": state["release_tag"],
-        "failingClusters": state["failing_clusters"],
-        "rcaSummary": state.get("llm_rca_summary", "All checks passed"),
-        "status": "Validated" if len(state["failing_clusters"]) == 0 else "ValidationFailed"
-    }
-    kafka_producer.send("gitops.change.validation", json.dumps(report_payload))
-    state["report_emitted"] = True
+def commit_github_evidence_node(state: dict) -> dict:
+    # External Agent commits log file to GitHub evidence repo
+    file_path = f"evidence/{state['chg_number']}/failure-summary.log"
+    web_url = github_client.commit_file(
+        repo="gitops-evidence-repo",
+        path=file_path,
+        content=json.dumps(state["spoke_reports"]),
+        message=f"docs(evidence): Diagnostic evidence for {state['chg_number']}"
+    )
+    state["evidence_url"] = web_url
     return state
 
-# Construct Central LangGraph State Graph
-workflow = StateGraph(CentralAgentState)
-workflow.add_node("fetch_git_metadata", fetch_git_metadata_node)
-workflow.add_node("collect_spoke_state", collect_spoke_state_node)
-workflow.add_node("fetch_logs", fetch_diagnostic_logs_node)
-workflow.add_node("llm_analyzer", llm_diagnostic_analyzer_node)
-workflow.add_node("emit_report", emit_validation_report_node)
+def send_teams_alert_node(state: dict) -> dict:
+    card_payload = build_teams_adaptive_card(
+        chg_number=state["chg_number"],
+        release_tag=state["release_tag"],
+        rca_summary=state.get("llm_rca_summary", "All checks passed"),
+        evidence_url=state.get("evidence_url", "")
+    )
+    requests.post(os.getenv("TEAMS_WEBHOOK_URL"), json=card_payload)
+    state["alert_sent"] = True
+    return state
 
-# Add Edges
+# Build External Agent LangGraph Workflow
+workflow = StateGraph(dict)
+workflow.add_node("fetch_git_metadata", fetch_git_metadata_node)
+workflow.add_node("collect_spoke_telemetry", collect_spoke_telemetry_node)
+workflow.add_node("llm_analyzer", llm_diagnostic_analyzer_node)
+workflow.add_node("commit_evidence", commit_github_evidence_node)
+workflow.add_node("send_teams_alert", send_teams_alert_node)
+
 workflow.set_entry_point("fetch_git_metadata")
-workflow.add_edge("fetch_git_metadata", "collect_spoke_state")
+workflow.add_edge("fetch_git_metadata", "collect_spoke_telemetry")
 workflow.add_conditional_edges(
-    "collect_spoke_state",
+    "collect_spoke_telemetry",
     route_health_check,
     {
-        "diagnose": "fetch_logs",
-        "emit_report": "emit_report"
+        "diagnose": "llm_analyzer",
+        "send_teams_alert": "send_teams_alert"
     }
 )
-workflow.add_edge("fetch_logs", "llm_analyzer")
-workflow.add_edge("llm_analyzer", "emit_report")
-workflow.add_edge("emit_report", END)
+workflow.add_edge("llm_analyzer", "commit_evidence")
+workflow.add_edge("commit_evidence", "send_teams_alert")
+workflow.add_edge("send_teams_alert", END)
 
-central_agent_app = workflow.compile()
+external_agent_app = workflow.compile()
 ```

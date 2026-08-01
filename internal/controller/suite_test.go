@@ -7,11 +7,35 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 )
+
+
+// psNamespacedName returns the NamespacedName for a PropagationStatus.
+// Go does not allow attaching methods to types from external packages, so we
+// use a package-level helper instead of a method receiver.
+func psNamespacedName(ps *gitopsv1alpha1.PropagationStatus) types.NamespacedName {
+	return types.NamespacedName{
+		Namespace: ps.Namespace,
+		Name:      ps.Name,
+	}
+}
+
+// ctrlRequest constructs a controller-runtime reconcile request.
+func ctrlRequest(namespace, name string) ctrl.Request {
+	return ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Namespace: namespace,
+			Name:      name,
+		},
+	}
+}
 
 func TestPropagationStatusController(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -46,10 +70,20 @@ func TestPropagationStatusController(t *testing.T) {
 		},
 	}
 
+	// WithIndex registers the same field indexer that SetupWithManager adds,
+	// so the reconciler's List(MatchingFields{"spec.appName": ...}) works
+	// against the fake client.
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(ps, report1).
 		WithStatusSubresource(ps).
+		WithIndex(&gitopsv1alpha1.ClusterAppReport{}, "spec.appName", func(obj client.Object) []string {
+			rep, ok := obj.(*gitopsv1alpha1.ClusterAppReport)
+			if !ok || rep.Spec.AppName == "" {
+				return nil
+			}
+			return []string{rep.Spec.AppName}
+		}).
 		Build()
 
 	r := &PropagationStatusReconciler{
@@ -68,7 +102,7 @@ func TestPropagationStatusController(t *testing.T) {
 	}
 
 	var updatedPS gitopsv1alpha1.PropagationStatus
-	if err := fakeClient.Get(ctx, ps.NamespacedName(), &updatedPS); err != nil {
+	if err := fakeClient.Get(ctx, psNamespacedName(ps), &updatedPS); err != nil {
 		t.Fatalf("failed to fetch updated PS: %v", err)
 	}
 
@@ -76,6 +110,7 @@ func TestPropagationStatusController(t *testing.T) {
 		t.Errorf("expected us-east-02 to be missing, got missing=%v", updatedPS.Status.MissingClusters)
 	}
 }
+
 
 func TestChangeWindowSilenceClassification(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -155,21 +190,5 @@ func TestChangeWindowSilenceClassification(t *testing.T) {
 	silenceDuring := r.classifySilence("svc-payments", csWentSilent, chg, now, 300*time.Second)
 	if silenceDuring.State != "WentSilentDuringChg" {
 		t.Errorf("expected state WentSilentDuringChg, got %s", silenceDuring.State)
-	}
-}
-
-func ctrlRequest(namespace, name string) ctrl.Request {
-	return ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Namespace: namespace,
-			Name:      name,
-		},
-	}
-}
-
-func (ps *gitopsv1alpha1.PropagationStatus) NamespacedName() types.NamespacedName {
-	return types.NamespacedName{
-		Namespace: ps.Namespace,
-		Name:      ps.Name,
 	}
 }

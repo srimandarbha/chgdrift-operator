@@ -84,16 +84,18 @@ docker push nexus.company.com:8082/gitops-fleet/drift-operator:v1.0.0
 
 ---
 
-## Phase 3: Configure Internal Nexus Raw Repository for Log Evidence
+## Phase 3: Configure Log Evidence Storage (Nexus Raw or GitHub Evidence Repo)
 
-Instead of external S3 cloud storage, air-gapped baremetal deployments use an internal **Nexus Raw Repository** for storing 500-line pod diagnostic logs:
+Air-gapped baremetal deployments support two decentralized log storage options:
 
-1. **Create Repository**: In Sonatype Nexus Repository Manager, create a **Raw (Hosted)** repository named `gitops-evidence`.
-2. **Set Permissions**: Enable HTTP Basic Auth for `PUT` uploads by operators and **Anonymous Read** for browser log inspection by SREs.
-3. **Log Storage URL Structure**:
-   ```text
-   https://nexus.company.com:8081/repository/gitops-evidence/{CHG_NUMBER}/{CLUSTER}-{APP}-attempt-{ATTEMPT}.log
-   ```
+### Option A: Internal Nexus Raw Repository
+1. Create a **Raw (Hosted)** repository named `gitops-evidence` in Nexus.
+2. Log URL Structure: `https://nexus.company.com:8081/repository/gitops-evidence/{CHG_NUMBER}/{CLUSTER}-{APP}-attempt-{ATTEMPT}.log`
+
+### Option B: Dedicated GitHub Evidence Repository
+1. Create a dedicated GitHub repository `https://github.com/my-org/gitops-evidence-repo`.
+2. Provision a **Fine-Grained GitHub App Token** on each spoke cluster restricted strictly to `gitops-evidence-repo` with `Contents: Read/Write` on path `evidence/{CLUSTER_NAME}/...`.
+3. Log URL Structure: `https://github.com/my-org/gitops-evidence-repo/blob/main/evidence/{CHG_NUMBER}/{CLUSTER}-{APP}-attempt-{ATTEMPT}.log`
 
 ---
 

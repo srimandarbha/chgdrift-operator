@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drift-operator-config
+  namespace: gitops-fleet
+  labels:
+    app.kubernetes.io/name: drift-operator
+data:
+  # Nexus Raw repository base URL for evidence log uploads.
+  # Override per environment — no binary recompilation needed.
+  NEXUS_RAW_REPO_URL: "https://nexus.company.com:8081/repository/gitops-evidence"
+
+  # Kafka broker addresses (comma-separated). Leave empty to disable Kafka.
+  # KAFKA_BROKERS: "kafka-broker-1:9093,kafka-broker-2:9093"
+
+  # Kafka topic the operator consumes CHG events from.
+  KAFKA_INGEST_TOPIC: "gitops.chg.events"
+
+  # Kafka topic the operator publishes validation reports to.
+  KAFKA_EMIT_TOPIC: "gitops.change.validation"
+
+  # Operator's own namespace (used when creating ChangeWindow CRs from Kafka).
+  OPERATOR_NAMESPACE: "gitops-fleet"
+
+  # CLUSTER_NAME: set this on spoke deployments to activate LocalAppWatchReconciler.
+  # Hub deployments leave this unset.
+  # CLUSTER_NAME: "us-east-01"

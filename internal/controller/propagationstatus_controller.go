@@ -146,6 +146,11 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			ObservedAt:       rep.Spec.ObservedAt,
 			MCPStatus:        rep.Spec.MCPStatus,
 			State:            state,
+			// Relay spoke-collected observability data to the hub validation gate.
+			VMStatus:      rep.Spec.VMStatus,
+			RecentEvents:  rep.Spec.RecentEvents,
+			ObjectChanges: rep.Spec.ObjectChanges,
+			Dependencies:  rep.Spec.Dependencies,
 		})
 		metrics.RecordClusterMetrics(ps.Spec.AppName, clusterName, state, state == StateInSync, lagSeconds, reportAge.Seconds())
 	}

@@ -1,0 +1,16 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: drift-operator-pdb
+  namespace: gitops-fleet
+  labels:
+    app.kubernetes.io/name: drift-operator
+spec:
+  # Ensure at least one replica is always available.
+  # This operator's job is to watch MachineConfigPool drains — both replicas
+  # must never be simultaneously evictable, especially during the very
+  # maintenance windows the operator is tracking.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager

@@ -5,6 +5,68 @@ import (
 )
 
 // ----------------------------------------------------------------------------
+// Supporting types for spoke-collected observability data.
+// ----------------------------------------------------------------------------
+
+// EventSummary captures a single de-duplicated Kubernetes Warning event.
+type EventSummary struct {
+	// Reason is the machine-readable event reason (e.g. FailedScheduling, BackOff).
+	Reason string `json:"reason"`
+	// Message is the human-readable event message.
+	Message string `json:"message"`
+	// Count is the total number of times this event was observed.
+	Count int32 `json:"count"`
+	// LastObservedAt is when the event was most recently seen.
+	LastObservedAt metav1.Time `json:"lastObservedAt"`
+	// InvolvedObject identifies the resource that generated this event (e.g. "Pod/svc-payments-7f9c-x2j4k").
+	InvolvedObject string `json:"involvedObject"`
+}
+
+// ObjectChangeSummary describes a single resource touched by the last ArgoCD sync.
+type ObjectChangeSummary struct {
+	// Kind is the resource kind (e.g. Deployment, VirtualMachine, ConfigMap).
+	Kind string `json:"kind"`
+	// Name is the resource name.
+	Name string `json:"name"`
+	// ChangeType is one of: Created | Updated | Deleted.
+	ChangeType string `json:"changeType"`
+	// ChangedFields is a best-effort list of mutated field paths, relayed from ArgoCD's diff.
+	// +listType=atomic
+	ChangedFields []string `json:"changedFields,omitempty"`
+}
+
+// DependencyRef describes a single external resource referenced by the application workloads.
+type DependencyRef struct {
+	// Kind is the resource kind (e.g. ConfigMap, Secret, DataVolume, NetworkAttachmentDefinition).
+	Kind string `json:"kind"`
+	// Name is the resource name.
+	Name string `json:"name"`
+	// Ready indicates whether the dependency exists and is in a usable state.
+	Ready bool `json:"ready"`
+	// Note carries optional human-readable context (e.g. "owned by a different Application: platform-secrets").
+	Note string `json:"note,omitempty"`
+}
+
+// VMHealthStatus captures the runtime health of an OpenShift Virtualization VirtualMachine
+// during a CHG window. A VM whose spec changed but whose VMI hasn't restarted is a
+// common silent failure mode: ArgoCD shows Synced while the workload still runs the old config.
+type VMHealthStatus struct {
+	// Name is the VirtualMachine name.
+	Name string `json:"name"`
+	// Ready reflects VMI status.conditions[Ready].
+	Ready bool `json:"ready"`
+	// LiveMigratable reflects VMI status.conditions[LiveMigratable].
+	LiveMigratable bool `json:"liveMigratable"`
+	// RestartRequired is true when VM status.conditions[RestartRequired] is True —
+	// meaning the running VMI has not yet picked up a spec change.
+	RestartRequired bool `json:"restartRequired"`
+	// DataVolumesBound is true when all referenced DataVolumes have phase == Succeeded.
+	DataVolumesBound bool `json:"dataVolumesBound"`
+	// ActiveMigration is the name of any in-flight VirtualMachineInstanceMigration, empty otherwise.
+	ActiveMigration string `json:"activeMigration,omitempty"`
+}
+
+// ----------------------------------------------------------------------------
 // ClusterAppReport: one per (cluster, app). Written ONLY by the agent running
 // in that cluster, using a ServiceAccount scoped to create/update/get on this
 // resource in its own namespace. Agents never touch PropagationStatus
@@ -36,6 +98,28 @@ type ClusterAppReportSpec struct {
 
 	// ObservedAt is when the agent captured this snapshot locally.
 	ObservedAt metav1.Time `json:"observedAt"`
+
+	// RecentEvents is a de-duplicated list of Warning events collected from the
+	// application namespace. Only populated when the app is OutOfSync or Degraded.
+	// +listType=atomic
+	RecentEvents []EventSummary `json:"recentEvents,omitempty"`
+
+	// TailLogs contains the last N log lines from non-Ready pods in the application.
+	// Only populated when the app is OutOfSync or Degraded.
+	// +listType=atomic
+	TailLogs []string `json:"tailLogs,omitempty"`
+
+	// ObjectChanges summarises resources touched by the most recent ArgoCD sync.
+	// +listType=atomic
+	ObjectChanges []ObjectChangeSummary `json:"objectChanges,omitempty"`
+
+	// Dependencies lists external resources that the application references and their readiness.
+	// +listType=atomic
+	Dependencies []DependencyRef `json:"dependencies,omitempty"`
+
+	// VMStatus contains OpenShift Virtualization health checks for VM-backed workloads.
+	// +listType=atomic
+	VMStatus []VMHealthStatus `json:"vmStatus,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -81,6 +165,9 @@ type MachineConfigPoolStatus struct {
 	Phase             string `json:"phase,omitempty"` // Updated | Updating | Degraded
 }
 
+// ClusterRevisionState represents the aggregated state for one cluster within a PropagationStatus.
+// The hub-side aggregator copies observable fields from ClusterAppReport so that
+// ChangeWindowReconciler has a single place to read all per-cluster data.
 type ClusterRevisionState struct {
 	ClusterName            string                  `json:"clusterName"`
 	ObservedRevision       string                  `json:"observedRevision,omitempty"`
@@ -91,6 +178,25 @@ type ClusterRevisionState struct {
 	MCPStatus              MachineConfigPoolStatus `json:"mcpStatus,omitempty"`
 	// State summarizes this row: InSync | Lagging | Diverged | Stale | Missing
 	State string `json:"state"`
+
+	// Spoke-collected observability data relayed by the propagation aggregator.
+
+	// VMStatus contains OpenShift Virtualization health checks. A non-empty
+	// RestartRequired or ActiveMigration blocks the hub validation gate.
+	// +listType=atomic
+	VMStatus []VMHealthStatus `json:"vmStatus,omitempty"`
+
+	// RecentEvents is a de-duplicated list of Warning events from the app namespace.
+	// +listType=atomic
+	RecentEvents []EventSummary `json:"recentEvents,omitempty"`
+
+	// ObjectChanges lists resources touched by the last ArgoCD sync.
+	// +listType=atomic
+	ObjectChanges []ObjectChangeSummary `json:"objectChanges,omitempty"`
+
+	// Dependencies lists external resource readiness checks.
+	// +listType=atomic
+	Dependencies []DependencyRef `json:"dependencies,omitempty"`
 }
 
 type PropagationStatusStatus struct {
@@ -180,12 +286,28 @@ type ActionRecord struct {
 	History        []ActionAttemptHistory `json:"history,omitempty"`
 }
 
+// ValidationResult captures the outcome of post-CHG validation across all gates.
+// Passed is the logical AND of all boolean gate fields.
 type ValidationResult struct {
-	AllChangesApplied bool     `json:"allChangesApplied"`
-	HealthCheckPassed bool     `json:"healthCheckPassed"`
-	MCPUpdatedOnTime  bool     `json:"mcpUpdatedOnTime"`
-	IssuesFound       []string `json:"issuesFound,omitempty"`
-	Passed            bool     `json:"passed"`
+	// AllChangesApplied is true when every target cluster is InSync.
+	AllChangesApplied bool `json:"allChangesApplied"`
+	// HealthCheckPassed is true when all clusters report Healthy.
+	HealthCheckPassed bool `json:"healthCheckPassed"`
+	// MCPUpdatedOnTime is true when no MachineConfigPool is still Updating or Degraded.
+	MCPUpdatedOnTime bool `json:"mcpUpdatedOnTime"`
+	// EventsClean is true when no unresolved Warning events exist since the window opened.
+	EventsClean bool `json:"eventsClean"`
+	// ObjectsConverged is true when ArgoCD's resource list reports all objects Synced/Healthy.
+	ObjectsConverged bool `json:"objectsConverged"`
+	// DependenciesReady is true when all referenced ConfigMaps/Secrets/DataVolumes are ready.
+	DependenciesReady bool `json:"dependenciesReady"`
+	// VMChecksPassed is true when no VM has RestartRequired=true or an in-flight migration.
+	VMChecksPassed bool `json:"vmChecksPassed"`
+	// IssuesFound is a human-readable list of the failing checks.
+	// +listType=atomic
+	IssuesFound []string `json:"issuesFound,omitempty"`
+	// Passed is the AND of all gate fields above.
+	Passed bool `json:"passed"`
 }
 
 type ChangeWindowStatus struct {

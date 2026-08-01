@@ -11,11 +11,14 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 )
+
 
 type KafkaConfig struct {
 	Brokers          []string
@@ -147,28 +150,43 @@ func (kb *KafkaBridge) StartConsumer(ctx context.Context, namespace string) {
 	if kb.Reader == nil {
 		return
 	}
+	logger := log.Log.WithName("kafka-consumer")
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
-				_ = kb.Reader.Close()
+				if err := kb.Reader.Close(); err != nil {
+					logger.Error(err, "error closing Kafka reader")
+				}
 				return
 			default:
-				msg, err := kb.Reader.ReadMessage(ctx)
+				// FetchMessage does NOT auto-commit. We commit manually only after
+				// a successful Create (or an AlreadyExists — idempotent under redelivery).
+				msg, err := kb.Reader.FetchMessage(ctx)
 				if err != nil {
 					if ctx.Err() != nil {
 						return
 					}
+					logger.Error(err, "failed to fetch Kafka message; retrying in 2s")
 					time.Sleep(2 * time.Second)
 					continue
 				}
 
 				var payload IngestEventPayload
 				if err := json.Unmarshal(msg.Value, &payload); err != nil {
+					logger.Error(err, "failed to unmarshal Kafka message; skipping")
+					// Commit the malformed message so we don't get stuck on it.
+					if cerr := kb.Reader.CommitMessages(ctx, msg); cerr != nil {
+						logger.Error(cerr, "failed to commit malformed Kafka message offset")
+					}
 					continue
 				}
 
 				if payload.CHGDetails.CHGNumber == "" {
+					logger.Info("Kafka message missing chgNumber; skipping")
+					if cerr := kb.Reader.CommitMessages(ctx, msg); cerr != nil {
+						logger.Error(cerr, "failed to commit empty Kafka message offset")
+					}
 					continue
 				}
 
@@ -190,8 +208,29 @@ func (kb *KafkaBridge) StartConsumer(ctx context.Context, namespace string) {
 					},
 				}
 
-				_ = kb.Client.Create(ctx, chg)
+				if err := kb.Client.Create(ctx, chg); err != nil {
+					if apierrors.IsAlreadyExists(err) {
+						// Normal under at-least-once delivery; idempotent — commit and move on.
+						logger.V(1).Info("ChangeWindow already exists; duplicate Kafka delivery",
+							"chg", payload.CHGDetails.CHGNumber)
+					} else {
+						// Real error — do NOT commit. The message will be redelivered after the
+						// consumer group's session timeout and we'll retry.
+						logger.Error(err, "failed to create ChangeWindow from Kafka message; will retry",
+							"chg", payload.CHGDetails.CHGNumber)
+						continue
+					}
+				} else {
+					logger.Info("ChangeWindow created from Kafka event", "chg", payload.CHGDetails.CHGNumber)
+				}
+
+				// Commit only after the resource is durably in the API server.
+				if cerr := kb.Reader.CommitMessages(ctx, msg); cerr != nil {
+					logger.Error(cerr, "failed to commit Kafka offset after successful Create",
+						"chg", payload.CHGDetails.CHGNumber)
+				}
 			}
 		}
 	}()
 }
+

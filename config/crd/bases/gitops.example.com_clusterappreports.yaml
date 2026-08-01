@@ -61,3 +61,55 @@ spec:
                     updatingNodeCount: { type: integer }
                     degradedNodeCount: { type: integer }
                     phase: { type: string }
+                # Spoke-collected observability data — only populated when
+                # the app is OutOfSync or Degraded to keep etcd writes cheap.
+                recentEvents:
+                  type: array
+                  items:
+                    type: object
+                    required: ["reason", "message", "count", "lastObservedAt", "involvedObject"]
+                    properties:
+                      reason: { type: string }
+                      message: { type: string }
+                      count: { type: integer }
+                      lastObservedAt: { type: string, format: date-time }
+                      involvedObject: { type: string }
+                tailLogs:
+                  type: array
+                  items:
+                    type: string
+                objectChanges:
+                  type: array
+                  items:
+                    type: object
+                    required: ["kind", "name", "changeType"]
+                    properties:
+                      kind: { type: string }
+                      name: { type: string }
+                      changeType: { type: string }
+                      changedFields:
+                        type: array
+                        items:
+                          type: string
+                dependencies:
+                  type: array
+                  items:
+                    type: object
+                    required: ["kind", "name", "ready"]
+                    properties:
+                      kind: { type: string }
+                      name: { type: string }
+                      ready: { type: boolean }
+                      note: { type: string }
+                vmStatus:
+                  type: array
+                  items:
+                    type: object
+                    required: ["name", "ready", "liveMigratable", "restartRequired", "dataVolumesBound"]
+                    properties:
+                      name: { type: string }
+                      ready: { type: boolean }
+                      liveMigratable: { type: boolean }
+                      restartRequired: { type: boolean }
+                      dataVolumesBound: { type: boolean }
+                      activeMigration: { type: string }

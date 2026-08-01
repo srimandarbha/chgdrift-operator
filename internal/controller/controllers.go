@@ -2,8 +2,11 @@ package controller
 
 import (
 	"fmt"
+	"os"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	"example.com/drift-operator/internal/kafka"
 )
 
 // Controller interface for extensible registration
@@ -12,7 +15,12 @@ type Controller interface {
 }
 
 // SetupAllControllers registers all current and future controllers with the manager.
-func SetupAllControllers(mgr ctrl.Manager) error {
+// kafkaBridge may be nil when Kafka is disabled; all controllers handle a nil bridge safely.
+func SetupAllControllers(mgr ctrl.Manager, kafkaBridge *kafka.KafkaBridge) error {
+	// Spoke mode: CLUSTER_NAME env var enables the LocalAppWatchReconciler, which
+	// writes ClusterAppReports from local ArgoCD/workload state.
+	clusterName := os.Getenv("CLUSTER_NAME")
+
 	controllers := []struct {
 		name       string
 		controller Controller
@@ -27,15 +35,27 @@ func SetupAllControllers(mgr ctrl.Manager) error {
 		{
 			name: "ChangeWindow",
 			controller: &ChangeWindowReconciler{
-				Client:   mgr.GetClient(),
-				Recorder: mgr.GetEventRecorderFor("changewindow-controller"),
+				Client:      mgr.GetClient(),
+				Recorder:    mgr.GetEventRecorderFor("changewindow-controller"),
+				KafkaBridge: kafkaBridge, // nil when Kafka is disabled — handled safely
 			},
 		},
-		// Future controllers registered here with 1 line:
-		// {
-		// 	name: "RemediationJob",
-		// 	controller: &RemediationJobReconciler{...},
-		// },
+	}
+
+	// Register the spoke-side controller when running on a spoke cluster.
+	// The hub runs both reconcilers above; a dedicated spoke deployment sets
+	// CLUSTER_NAME and omits hub RBAC grants.
+	if clusterName != "" {
+		controllers = append(controllers, struct {
+			name       string
+			controller Controller
+		}{
+			name: "LocalAppWatch",
+			controller: &LocalAppWatchReconciler{
+				Client:      mgr.GetClient(),
+				ClusterName: clusterName,
+			},
+		})
 	}
 
 	for _, c := range controllers {

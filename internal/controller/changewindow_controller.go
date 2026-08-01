@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,11 +18,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
+	"example.com/drift-operator/internal/kafka"
 )
 
+// ChangeWindowReconciler reconciles ChangeWindow objects.
+// KafkaBridge is optional; when non-nil, reports are published to Kafka on
+// phase transitions in addition to being logged.
 type ChangeWindowReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
+	Recorder    record.EventRecorder
+	KafkaBridge *kafka.KafkaBridge // nil-safe; omit to disable Kafka publishing
 }
 
 // +kubebuilder:rbac:groups=gitops.example.com,resources=changewindows,verbs=get;list;watch;create;update;patch;delete
@@ -102,10 +109,14 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// 5. Post-Validation Logic (Git Revision + Post Health Check + MCP Rollout Status)
+	// 5. Post-Validation Logic (all seven gates must pass for Passed=true)
 	allConverged := true
 	healthCheckPassed := true
 	mcpUpdatedOnTime := true
+	eventsClean := true
+	objectsConverged := true
+	dependenciesReady := true
+	vmChecksPassed := true
 
 	for _, appStateMap := range chg.Status.AppStates {
 		for _, cs := range appStateMap.ClusterStates {
@@ -115,8 +126,27 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			if cs.Health != "Healthy" && cs.Health != "" {
 				healthCheckPassed = false
 			}
-			if cs.MCPStatus.UpdatingNodeCount > 0 || cs.MCPStatus.DegradedNodeCount > 0 || cs.MCPStatus.Phase == "Updating" || cs.MCPStatus.Phase == "Degraded" {
+			if cs.MCPStatus.UpdatingNodeCount > 0 || cs.MCPStatus.DegradedNodeCount > 0 ||
+				cs.MCPStatus.Phase == "Updating" || cs.MCPStatus.Phase == "Degraded" {
 				mcpUpdatedOnTime = false
+			}
+			if len(cs.RecentEvents) > 0 {
+				eventsClean = false
+			}
+			for _, oc := range cs.ObjectChanges {
+				if oc.ChangeType == "Failed" {
+					objectsConverged = false
+				}
+			}
+			for _, dep := range cs.Dependencies {
+				if !dep.Ready {
+					dependenciesReady = false
+				}
+			}
+			for _, vm := range cs.VMStatus {
+				if vm.RestartRequired || vm.ActiveMigration != "" || !vm.DataVolumesBound {
+					vmChecksPassed = false
+				}
 			}
 		}
 	}
@@ -128,8 +158,13 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		AllChangesApplied: allConverged,
 		HealthCheckPassed: healthCheckPassed,
 		MCPUpdatedOnTime:  mcpUpdatedOnTime,
+		EventsClean:       eventsClean,
+		ObjectsConverged:  objectsConverged,
+		DependenciesReady: dependenciesReady,
+		VMChecksPassed:    vmChecksPassed,
 		IssuesFound:       issuesFound,
-		Passed:            allConverged && healthCheckPassed && mcpUpdatedOnTime && noSilence,
+		Passed: allConverged && healthCheckPassed && mcpUpdatedOnTime &&
+			eventsClean && objectsConverged && dependenciesReady && vmChecksPassed && noSilence,
 	}
 
 	previousPhase := chg.Status.Phase
@@ -149,6 +184,14 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		reportPayload, err := r.BuildKafkaReportJSON(&chg, now)
 		if err == nil {
 			logger.Info("Kafka report compiled", "chg", chg.Spec.CHGNumber, "phase", chg.Status.Phase, "payloadSizeBytes", len(reportPayload))
+			// Publish to Kafka when the bridge is configured.
+			// Errors are logged but not returned; a Kafka outage must never
+			// block status reconciliation or cause a requeue storm.
+			if r.KafkaBridge != nil {
+				if kerr := r.KafkaBridge.ProduceReport(ctx, chg.Spec.CHGNumber, reportPayload); kerr != nil {
+					logger.Error(kerr, "failed to publish report to Kafka", "chg", chg.Spec.CHGNumber)
+				}
+			}
 			chg.Status.LastReportedAt = metav1.NewTime(now)
 		}
 	}
@@ -267,19 +310,64 @@ func (r *ChangeWindowReconciler) buildIssuesList(chg *gitopsv1alpha1.ChangeWindo
 	var issues []string
 	for appName, appStateMap := range chg.Status.AppStates {
 		for _, cs := range appStateMap.ClusterStates {
+			// State / sync divergence
 			if cs.State == "Diverged" || cs.State == "OutOfSync" {
 				issues = append(issues, fmt.Sprintf("%s/%s: local drift (OutOfSync)", appName, cs.ClusterName))
 			} else if cs.State == "Lagging" {
-				issues = append(issues, fmt.Sprintf("%s/%s: observed revision %s trailing expected %s", appName, cs.ClusterName, cs.ObservedRevision, chg.Spec.ExpectedRevision))
+				issues = append(issues, fmt.Sprintf("%s/%s: observed revision %s trailing expected %s",
+					appName, cs.ClusterName, cs.ObservedRevision, chg.Spec.ExpectedRevision))
 			}
+			// Health
 			if cs.Health != "Healthy" && cs.Health != "" {
-				issues = append(issues, fmt.Sprintf("%s/%s: post-health check failed (Health = %s)", appName, cs.ClusterName, cs.Health))
+				issues = append(issues, fmt.Sprintf("%s/%s: post-health check failed (Health = %s)",
+					appName, cs.ClusterName, cs.Health))
 			}
+			// MCP rollout
 			if cs.MCPStatus.UpdatingNodeCount > 0 {
-				issues = append(issues, fmt.Sprintf("%s/%s: MachineConfigPool %s still updating %d node(s)", appName, cs.ClusterName, cs.MCPStatus.Name, cs.MCPStatus.UpdatingNodeCount))
+				issues = append(issues, fmt.Sprintf("%s/%s: MachineConfigPool %s still updating %d node(s)",
+					appName, cs.ClusterName, cs.MCPStatus.Name, cs.MCPStatus.UpdatingNodeCount))
 			}
 			if cs.MCPStatus.DegradedNodeCount > 0 {
-				issues = append(issues, fmt.Sprintf("%s/%s: MachineConfigPool %s has %d degraded node(s)", appName, cs.ClusterName, cs.MCPStatus.Name, cs.MCPStatus.DegradedNodeCount))
+				issues = append(issues, fmt.Sprintf("%s/%s: MachineConfigPool %s has %d degraded node(s)",
+					appName, cs.ClusterName, cs.MCPStatus.Name, cs.MCPStatus.DegradedNodeCount))
+			}
+			// Warning events
+			for _, ev := range cs.RecentEvents {
+				issues = append(issues, fmt.Sprintf("%s/%s: Warning event %s on %s (×%d): %s",
+					appName, cs.ClusterName, ev.Reason, ev.InvolvedObject, ev.Count, ev.Message))
+			}
+			// Failed object changes
+			for _, oc := range cs.ObjectChanges {
+				if oc.ChangeType == "Failed" {
+					issues = append(issues, fmt.Sprintf("%s/%s: ArgoCD resource %s/%s failed to sync",
+						appName, cs.ClusterName, oc.Kind, oc.Name))
+				}
+			}
+			// Unready dependencies
+			for _, dep := range cs.Dependencies {
+				if !dep.Ready {
+					note := dep.Note
+					if note != "" {
+						note = " (" + note + ")"
+					}
+					issues = append(issues, fmt.Sprintf("%s/%s: dependency %s/%s not ready%s",
+						appName, cs.ClusterName, dep.Kind, dep.Name, note))
+				}
+			}
+			// VM-specific checks (RestartRequired, ActiveMigration, DataVolumes)
+			for _, vm := range cs.VMStatus {
+				if vm.RestartRequired {
+					issues = append(issues, fmt.Sprintf("%s/%s: VM %s needs a restart to pick up its new spec",
+						appName, cs.ClusterName, vm.Name))
+				}
+				if vm.ActiveMigration != "" {
+					issues = append(issues, fmt.Sprintf("%s/%s: VM %s has an in-flight live migration (%s)",
+						appName, cs.ClusterName, vm.Name, vm.ActiveMigration))
+				}
+				if !vm.DataVolumesBound {
+					issues = append(issues, fmt.Sprintf("%s/%s: VM %s has unbound DataVolumes",
+						appName, cs.ClusterName, vm.Name))
+				}
 			}
 		}
 	}
