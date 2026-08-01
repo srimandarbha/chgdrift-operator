@@ -181,6 +181,8 @@ type ActionRecord struct {
 
 type ValidationResult struct {
 	AllChangesApplied bool     `json:"allChangesApplied"`
+	HealthCheckPassed bool     `json:"healthCheckPassed"`
+	MCPUpdatedOnTime  bool     `json:"mcpUpdatedOnTime"`
 	IssuesFound       []string `json:"issuesFound,omitempty"`
 	Passed            bool     `json:"passed"`
 }

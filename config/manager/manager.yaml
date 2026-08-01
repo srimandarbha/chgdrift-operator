@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: gitops-fleet
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: drift-operator
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  replicas: 2
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: drift-operator-controller-manager
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - command:
+        - /manager
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8080
+        image: drift-operator:latest
+        name: manager
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        envFrom:
+        - secretRef:
+            name: drift-operator-kafka-certs
+            optional: true
+      terminationGracePeriodSeconds: 60

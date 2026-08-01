@@ -73,11 +73,10 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	var reports gitopsv1alpha1.ClusterAppReportList
-	// Rule 5: Limit pagination on list calls to prevent memory spikes
+	// List matching reports from informer cache
 	if err := r.List(ctx, &reports,
 		client.InNamespace(ps.Namespace),
 		client.MatchingFields{"spec.appName": ps.Spec.AppName},
-		client.Limit(100),
 	); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -145,6 +144,7 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			SyncStatus:       rep.Spec.SyncStatus,
 			Health:           rep.Spec.Health,
 			ObservedAt:       rep.Spec.ObservedAt,
+			MCPStatus:        rep.Spec.MCPStatus,
 			State:            state,
 		})
 		metrics.RecordClusterMetrics(ps.Spec.AppName, clusterName, state, state == StateInSync, lagSeconds, reportAge.Seconds())

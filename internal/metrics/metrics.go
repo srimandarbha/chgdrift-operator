@@ -8,7 +8,7 @@ import (
 var (
 	ClusterStateGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "gitops_cluster_propagation_state",
+			Name: "gitops_propagation_cluster_state",
 			Help: "1 if the cluster is in this state for this app, 0 otherwise.",
 		},
 		[]string{"app", "cluster", "state"},
@@ -16,7 +16,7 @@ var (
 
 	ClusterLagSecondsGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "gitops_cluster_propagation_lag_seconds",
+			Name: "gitops_propagation_lag_seconds",
 			Help: "Seconds this cluster has been trailing expected_revision.",
 		},
 		[]string{"app", "cluster"},
@@ -24,7 +24,7 @@ var (
 
 	ClusterReportAgeGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "gitops_cluster_report_age_seconds",
+			Name: "gitops_propagation_report_age_seconds",
 			Help: "Seconds since the agent in this cluster captured its last report.",
 		},
 		[]string{"app", "cluster"},

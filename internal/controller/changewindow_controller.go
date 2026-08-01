@@ -228,8 +228,8 @@ func (r *ChangeWindowReconciler) runParkedHardRefreshAction(chg *gitopsv1alpha1.
 
 	// Rule 4: Size Limit Discipline - Capped inline logs (max 20 lines / 2KB) to stay well under etcd limits (1.5MB)
 	tailLogs := []string{
-		fmt.Sprintf("%s - WARN: ImagePullBackOff on container %s-api", now.Format(time.RFC3339), appName),
-		fmt.Sprintf("%s - ERROR: Connection timeout connecting to registry.internal", now.Format(time.RFC3339)),
+		fmt.Sprintf("%s - [SIMULATED] WARN: ImagePullBackOff on container %s-api", now.Format(time.RFC3339), appName),
+		fmt.Sprintf("%s - [SIMULATED] ERROR: Connection timeout connecting to registry.internal", now.Format(time.RFC3339)),
 	}
 	if len(tailLogs) > 20 {
 		tailLogs = tailLogs[len(tailLogs)-20:]
@@ -248,7 +248,7 @@ func (r *ChangeWindowReconciler) runParkedHardRefreshAction(chg *gitopsv1alpha1.
 		TriggeredAt:   metav1.NewTime(now),
 		TriggerResult: "Parked (Execution disabled in operator config)",
 		LogRef:        logRef,
-		LogSummary:    fmt.Sprintf("ImagePullBackOff detected on %s in cluster %s", appName, cs.ClusterName),
+		LogSummary:    fmt.Sprintf("SIMULATED (stub - live pod log query pending): ImagePullBackOff on %s in cluster %s", appName, cs.ClusterName),
 		TailLogs:      tailLogs,
 	})
 

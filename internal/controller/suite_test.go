@@ -1,0 +1,175 @@
+package controller
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
+)
+
+func TestPropagationStatusController(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	ps := &gitopsv1alpha1.PropagationStatus{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "svc-payments",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.PropagationStatusSpec{
+			AppName:          "svc-payments",
+			ExpectedRevision: "a1b2c3d9",
+			TargetClusters:   []string{"us-east-01", "us-east-02"},
+		},
+	}
+
+	report1 := &gitopsv1alpha1.ClusterAppReport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "us-east-01-svc-payments",
+			Namespace: "default",
+			Labels:    map[string]string{AppLabelKey: "svc-payments"},
+		},
+		Spec: gitopsv1alpha1.ClusterAppReportSpec{
+			ClusterName:      "us-east-01",
+			AppName:          "svc-payments",
+			ObservedRevision: "a1b2c3d9",
+			SyncStatus:       "Synced",
+			Health:           "Healthy",
+			ObservedAt:       metav1.Now(),
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ps, report1).
+		WithStatusSubresource(ps).
+		Build()
+
+	r := &PropagationStatusReconciler{
+		Client: fakeClient,
+	}
+
+	req := ctrlRequest("default", "svc-payments")
+	ctx := context.Background()
+
+	res, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("expected requeueAfter %v, got %v", RequeueInterval, res.RequeueAfter)
+	}
+
+	var updatedPS gitopsv1alpha1.PropagationStatus
+	if err := fakeClient.Get(ctx, ps.NamespacedName(), &updatedPS); err != nil {
+		t.Fatalf("failed to fetch updated PS: %v", err)
+	}
+
+	if len(updatedPS.Status.MissingClusters) != 1 || updatedPS.Status.MissingClusters[0] != "us-east-02" {
+		t.Errorf("expected us-east-02 to be missing, got missing=%v", updatedPS.Status.MissingClusters)
+	}
+}
+
+func TestChangeWindowSilenceClassification(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	now := time.Now()
+	startTime := metav1.NewTime(now.Add(-30 * time.Minute))
+	endTime := metav1.NewTime(now.Add(30 * time.Minute))
+
+	chg := &gitopsv1alpha1.ChangeWindow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chg0012345",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.ChangeWindowSpec{
+			CHGNumber:                   "CHG0012345",
+			ReleaseTag:                  "v2.4.0",
+			ExpectedRevision:            "a1b2c3d9",
+			RootApp:                     "platform-root",
+			ImpactedApps:                []string{"svc-payments"},
+			StartTime:                   startTime,
+			EndTime:                     endTime,
+			StaleReportThresholdSeconds: 300,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(chg).
+		WithStatusSubresource(chg).
+		Build()
+
+	r := &ChangeWindowReconciler{
+		Client: fakeClient,
+	}
+
+	// Test 1: Active cluster reporting within threshold
+	csActive := gitopsv1alpha1.ClusterRevisionState{
+		ClusterName:      "us-east-01",
+		ObservedRevision: "a1b2c3d9",
+		SyncStatus:       "Synced",
+		Health:           "Healthy",
+		ObservedAt:       metav1.NewTime(now.Add(-1 * time.Minute)),
+	}
+
+	silenceActive := r.classifySilence("svc-payments", csActive, chg, now, 300*time.Second)
+	if silenceActive.State != "Reporting" {
+		t.Errorf("expected active cluster state Reporting, got %s", silenceActive.State)
+	}
+
+	// Test 2: Cluster dark before CHG start
+	csDarkBefore := gitopsv1alpha1.ClusterRevisionState{
+		ClusterName:            "us-east-02",
+		ObservedRevision:       "a1b2c3d9",
+		SyncStatus:             "Synced",
+		Health:                 "Healthy",
+		ObservedAt:             metav1.NewTime(now.Add(-40 * time.Minute)),
+		SawReportSinceChgStart: false,
+	}
+
+	silenceBefore := r.classifySilence("svc-payments", csDarkBefore, chg, now, 300*time.Second)
+	if silenceBefore.State != "SilentBeforeChgStart" {
+		t.Errorf("expected state SilentBeforeChgStart, got %s", silenceBefore.State)
+	}
+
+	// Test 3: Cluster went silent during CHG
+	csWentSilent := gitopsv1alpha1.ClusterRevisionState{
+		ClusterName:            "us-east-03",
+		ObservedRevision:       "a1b2c3d9",
+		SyncStatus:             "Synced",
+		Health:                 "Healthy",
+		ObservedAt:             metav1.NewTime(now.Add(-10 * time.Minute)),
+		SawReportSinceChgStart: true,
+	}
+
+	silenceDuring := r.classifySilence("svc-payments", csWentSilent, chg, now, 300*time.Second)
+	if silenceDuring.State != "WentSilentDuringChg" {
+		t.Errorf("expected state WentSilentDuringChg, got %s", silenceDuring.State)
+	}
+}
+
+func ctrlRequest(namespace, name string) ctrl.Request {
+	return ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Namespace: namespace,
+			Name:      name,
+		},
+	}
+}
+
+func (ps *gitopsv1alpha1.PropagationStatus) NamespacedName() types.NamespacedName {
+	return types.NamespacedName{
+		Namespace: ps.Namespace,
+		Name:      ps.Name,
+	}
+}

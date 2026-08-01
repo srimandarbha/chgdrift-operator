@@ -52,3 +52,12 @@ spec:
                 observedAt:
                   type: string
                   format: date-time
+                mcpStatus:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    machineCount: { type: integer }
+                    updatedNodeCount: { type: integer }
+                    updatingNodeCount: { type: integer }
+                    degradedNodeCount: { type: integer }
+                    phase: { type: string }
