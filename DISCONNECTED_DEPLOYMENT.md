@@ -1,40 +1,81 @@
-# Disconnected / Air-Gapped Baremetal OpenShift Deployment Guide
+# Disconnected Baremetal Deployment & Red Hat CoP GitOps Integration Guide
 
-This guide provides step-by-step instructions for building, mirroring, and deploying the **Cross-Cluster GitOps Drift & CHG Correlation Operator** (`drift-operator`) to a **disconnected, air-gapped baremetal OpenShift Virtualization cluster** using an internal **Nexus Container Registry**.
+This guide provides an end-to-end operational workflow to **build, unit test, containerize, push to an internal Nexus Container Registry, and deploy `drift-operator`** across disconnected baremetal OpenShift clusters using the [Red Hat CoP GitOps Standards Repo Template](https://github.com/redhat-cop/gitops-standards-repo-template).
 
 ---
 
-## Architecture in Disconnected Baremetal Environment
-
-In an air-gapped environment, nodes have zero internet access. All container images must be pulled from an internal Nexus registry (`nexus.company.com:8082`), and all Kafka event communications occur over internal TLS (`kafka.internal:9094`).
+## Complete 6-Phase Operational Workflow
 
 ```
- [ Bastion Host / Build CI ]
-             │
-             ▼ (1. docker build & push)
- [ Internal Nexus Registry ] ◄── (nexus.company.com:8082)
-             │
-             ▼ (2. Air-gapped image pull via ServiceAccount Secret)
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ DISCONNECTED OPENSHIFT BAREMETAL CLUSTER (gitops-fleet)                  │
-│                                                                          │
-│  - Deployment (OpenShift restricted-v2 SCC compliant)                    │
-│  - Internal Kafka mTLS Bridge (kafka.internal:9094)                      │
-│  - Monitors OpenShift Virtualization MachineConfigPool (virt)           │
+│ PHASE 1: Build & Unit Test (Developer Machine / CI Runner)               │
+│  - Run unit tests & code formatting (`make test`, `make fmt`)            │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 2: Container Build & Push to Internal Nexus                        │
+│  - `docker build -t nexus.company.com:8082/.../drift-operator:v1.0.0 .`  │
+│  - `docker push nexus.company.com:8082/.../drift-operator:v1.0.0`        │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 3: Integrate Manifests into Red Hat CoP GitOps Standards Repo      │
+│  - Structure under `components/operators/drift-operator/`                │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 4: Kustomize Image Override for Air-Gapped Nexus URL               │
+│  - Map `drift-operator:latest` -> `nexus.company.com:8082/...:v1.0.0`    │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 5: Git Merge & Argo CD ApplicationSet Auto-Sync                     │
+│  - Push commit to Red Hat CoP GitOps Repo                                │
+│  - Argo CD syncs `bootstrap/` -> Deploys Operator to Hub Cluster         │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PHASE 6: Verification & Health Checks                                    │
+│  - Verify Pod, Leader Election Lease, & OpenShift `restricted-v2` SCC    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Step 1: Build Image & Push to Internal Nexus Registry
+## Phase 1: Build & Test locally
 
-Run these steps on a bastion host or CI runner with network access to the internal Nexus registry:
+Run formatting, linting, and unit tests using the Makefile:
 
 ```bash
-# 1. Build multi-stage container image targeting Linux AMD64
+# 1. Format code
+make fmt
+
+# 2. Run vet checks
+make vet
+
+# 3. Run unit tests & coverage (uses fake-client unit test harness in internal/controller/suite_test.go)
+make test
+
+# 4. Build local binary
+make build
+```
+
+---
+
+## Phase 2: Build Container Image & Push to Internal Nexus
+
+Run on a workstation or bastion host with access to the internal Nexus registry:
+
+```bash
+# 1. Build multi-stage container image for Linux AMD64
 docker build -t nexus.company.com:8082/gitops-fleet/drift-operator:v1.0.0 .
 
-# 2. Log in to internal Nexus Container Registry
+# 2. Authenticate to internal Nexus container registry
 docker login nexus.company.com:8082 -u <NEXUS_USER> -p <NEXUS_PASSWORD>
 
 # 3. Push container image to Nexus
@@ -43,15 +84,70 @@ docker push nexus.company.com:8082/gitops-fleet/drift-operator:v1.0.0
 
 ---
 
-## Step 2: Configure Kustomize Deployment Image
+## Phase 3: Structure Operator Manifests inside Red Hat CoP GitOps Repo
 
-Set the image URL to your internal Nexus registry in `config/manager/kustomization.yaml`:
+Inside your organizational clone of [redhat-cop/gitops-standards-repo-template](https://github.com/redhat-cop/gitops-standards-repo-template), structure the operator manifests under the `components/` directory:
+
+```text
+gitops-standards-repo/
+├── bootstrap/
+│   └── base/
+│       └── root-applicationset.yaml          <── Seeding Argo CD ApplicationSet
+├── components/
+│   └── operators/
+│       └── drift-operator/                  <── Add Operator Manifests Here
+│           ├── base/
+│           │   ├── crds/
+│           │   │   ├── gitops.example.com_clusterappreports.yaml
+│           │   │   ├── gitops.example.com_propagationstatuses.yaml
+│           │   │   └── gitops.example.com_changewindows.yaml
+│           │   ├── rbac/
+│           │   │   ├── service_account.yaml
+│           │   │   ├── role.yaml
+│           │   │   ├── role_binding.yaml
+│           │   │   ├── leader_election_role.yaml
+│           │   │   └── leader_election_role_binding.yaml
+│           │   ├── manager/
+│           │   │   └── manager.yaml
+│           │   └── kustomization.yaml
+│           └── overlays/
+│               └── prod/
+│                   └── kustomization.yaml   <── Image override to Nexus URL
+└── groups/
+    └── prod/
+        └── kustomization.yaml               <── Includes components/operators/drift-operator/overlays/prod
+```
+
+### `components/operators/drift-operator/base/kustomization.yaml`
 
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: gitops-fleet
 resources:
-  - manager.yaml
+  - crds/gitops.example.com_clusterappreports.yaml
+  - crds/gitops.example.com_propagationstatuses.yaml
+  - crds/gitops.example.com_changewindows.yaml
+  - rbac/service_account.yaml
+  - rbac/role.yaml
+  - rbac/role_binding.yaml
+  - rbac/leader_election_role.yaml
+  - rbac/leader_election_role_binding.yaml
+  - manager/manager.yaml
+```
+
+---
+
+## Phase 4: Configure Kustomize Image Override for Internal Nexus
+
+In `components/operators/drift-operator/overlays/prod/kustomization.yaml`, set the image override to pull from Nexus:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: gitops-fleet
+resources:
+  - ../../base
 images:
   - name: drift-operator
     newName: nexus.company.com:8082/gitops-fleet/drift-operator
@@ -60,88 +156,35 @@ images:
 
 ---
 
-## Step 3: Create Air-Gapped Secrets on OpenShift
+## Phase 5: Commit to Git & Auto-Sync via Argo CD
 
-Log in to your disconnected OpenShift cluster using `oc`:
+1. Commit and push the new component to your Red Hat CoP GitOps repository:
 
 ```bash
-# 1. Create target namespace
-oc create namespace gitops-fleet
-
-# 2. Create Image Pull Secret for Nexus Registry
-oc create secret docker-registry nexus-pull-secret \
-  --docker-server=nexus.company.com:8082 \
-  --docker-username=<NEXUS_USER> \
-  --docker-password=<NEXUS_PASSWORD> \
-  -n gitops-fleet
-
-# 3. Link Pull Secret to Operator ServiceAccount
-oc secrets link drift-operator-controller-manager nexus-pull-secret --for=pull -n gitops-fleet
-
-# 4. Create Kafka mTLS Certificate Secret (Internal Kafka)
-oc create secret generic drift-operator-kafka-certs \
-  --from-literal=KAFKA_BROKERS="kafka-broker1.internal:9094,kafka-broker2.internal:9094" \
-  --from-literal=KAFKA_INGEST_TOPIC="gitops.chg.events" \
-  --from-literal=KAFKA_EMIT_TOPIC="gitops.change.validation" \
-  --from-literal=KAFKA_SERVER_NAME="kafka.internal" \
-  --from-file=ca.crt=./ca.crt \
-  --from-file=tls.crt=./tls.crt \
-  --from-file=tls.key=./tls.key \
-  -n gitops-fleet
+git add components/operators/drift-operator groups/prod/kustomization.yaml
+git commit -m "feat(gitops): Add drift-operator component pointing to internal Nexus"
+git push origin main
 ```
+
+2. Argo CD automatically detects the commit on `main`, processes the `bootstrap/` ApplicationSet, creates the `gitops-fleet` namespace, applies the CRDs and RBAC, pulls `nexus.company.com:8082/gitops-fleet/drift-operator:v1.0.0`, and deploys the OpenShift `restricted-v2` SCC pod!
 
 ---
 
-## Step 4: Deploy CRDs, RBAC, and Manager
+## Phase 6: Verification & Troubleshooting
 
-Apply the manifests to OpenShift:
-
-```bash
-# 1. Apply CRDs (ClusterAppReport, PropagationStatus, ChangeWindow)
-oc apply -f config/crd/bases/
-
-# 2. Apply RBAC (ServiceAccount, ClusterRole, RoleBindings, Leader Election Leases)
-oc apply -f config/rbac/
-
-# 3. Apply Manager Deployment (OpenShift restricted-v2 SCC Compliant)
-oc apply -k config/manager/
-```
-
----
-
-## Step 5: OpenShift Security Context Constraint (SCC) Verification
-
-The operator deployment in `config/manager/manager.yaml` strictly complies with OpenShift's **`restricted-v2` SCC**:
-
-```yaml
-spec:
-  securityContext:
-    runAsNonRoot: true
-    seccompProfile:
-      type: RuntimeDefault
-  containers:
-    - name: manager
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop:
-            - ALL
-```
-
-> **Note**: No fixed `runAsUser` is declared. OpenShift automatically allocates UIDs dynamically from the namespace's UID range (`openshift.io/sa.scc.uid-range`), satisfying OpenShift baremetal security policies.
-
----
-
-## Step 6: Verify Deployment & Leader Election
+Verify the deployment on your disconnected OpenShift cluster using `oc`:
 
 ```bash
-# 1. Check Pod status
+# 1. Check Pod status in gitops-fleet namespace
 oc get pods -n gitops-fleet
 
-# 2. Check Leader Election Lease acquisition
+# 2. Verify OpenShift Security Context Constraint (SCC) allocation
+oc describe pod -l control-plane=controller-manager -n gitops-fleet | grep -i scc
+# Output should show: openshift.io/scc: restricted-v2
+
+# 3. Check Leader Election Lease acquisition
 oc get leases -n gitops-fleet
 
-# 3. Stream Operator Logs
+# 4. Stream Operator Logs
 oc logs -f deployment/controller-manager -c manager -n gitops-fleet
 ```
