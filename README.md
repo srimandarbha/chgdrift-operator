@@ -67,9 +67,10 @@ drift-operator/
 
 ## Documentation & Integration Guides
 
-- **[SRE_AGENT_ARCHITECTURE.md](SRE_AGENT_ARCHITECTURE.md)** — Autonomous Edge SRE Agent design, GitHub PR/Tag API integration, embedded DB caching, & LangGraph state graph.
-- **[LOCAL_TESTING.md](LOCAL_TESTING.md)** — Step-by-step local testing guide using `kind` (Kubernetes in Docker) & `make run`.
-- **[DISCONNECTED_DEPLOYMENT.md](DISCONNECTED_DEPLOYMENT.md)** — Step-by-step air-gapped baremetal OpenShift deployment, internal Nexus image mirroring, & restricted-v2 SCC guide.
+- **[TEAMS_INTEGRATION.md](TEAMS_INTEGRATION.md)** — MS Teams Incoming Webhook setup, Adaptive Cards v1.4 schema, and Nexus Raw log evidence buttons.
+- **[SRE_AGENT_ARCHITECTURE.md](SRE_AGENT_ARCHITECTURE.md)** — Autonomous Central SRE Agent design, GitHub PR/Tag API integration, embedded DB caching, & LangGraph state graph.
+- **[LOCAL_TESTING.md](LOCAL_TESTING.md)** — Step-by-step local testing guide using Docker Desktop Kubernetes & `make run`.
+- **[DISCONNECTED_DEPLOYMENT.md](DISCONNECTED_DEPLOYMENT.md)** — Step-by-step air-gapped baremetal OpenShift deployment, internal Nexus image mirroring, Nexus Raw log evidence, & restricted-v2 SCC guide.
 - **[KAFKA_INTEGRATION.md](KAFKA_INTEGRATION.md)** — Ingestion & emission Kafka topics, TLS/mTLS certificate (CN validation) setup, and JSON event schemas.
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** — Step-by-step 4-stage guide for adding new APIs, CRDs, and controllers.
 - **[.agents/AGENTS.md](.agents/AGENTS.md)** — Production Operator Development Guidelines.

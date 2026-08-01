@@ -1,44 +1,52 @@
-# Kafka Integration & Security Guide
+# Kafka Integration & Architecture Guide
 
-This document details the Kafka event specifications, topic architecture, security TLS/mTLS Certificate Authority (CA) & Common Name (CN) configuration, and JSON message payloads for the **Cross-Cluster GitOps Drift & CHG Correlation Operator** (`drift-operator`).
-
----
-
-## 1. Topic Architecture: Ingestion vs. Emission
-
-The Operator uses **two separate Kafka topics** to isolate input events from validation reports and prevent recursive feedback loops:
-
-```
-[ Drift Detection Agent / ITSM ]
-               │
-               ▼ (Publishes CHG Initiated Event)
-   [ Topic: gitops.chg.events ]  ◄─────── Ingestion Topic
-               │
-               ▼ (Consumes & Reconciles ChangeWindow CR)
-     [ drift-operator ]
-               │
-               ▼ (Emits Validation Report)
- [ Topic: gitops.change.validation ] ◄─── Emission Topic (DIFFERENT TOPIC)
-               │
-               ▼ (Consumes LLM JSON Report)
-[ SRE Agent / ChatOps / Dashboard ]
-```
-
-| Dimension | Ingestion Topic | Emission Topic |
-| :--- | :--- | :--- |
-| **Topic Name** | `gitops.chg.events` | `gitops.change.validation` |
-| **Partition Key** | `CHG0012345` (CHG Number) | `CHG0012345` (CHG Number) |
-| **Publisher** | Drift Detection Agent / CI/CD / ServiceNow | `drift-operator` Hub Controller |
-| **Consumer** | `drift-operator` Hub Controller | LLM SRE Agent / ChatOps / Dashboards |
-| **Purpose** | Triggers `ChangeWindow` CR creation & silence window | Reports fleet convergence, logs, & post-validation |
+This document details the topic architecture, security TLS/mTLS Certificate Authority (CA) & Common Name (CN) configuration, and JSON message payloads for the **Direct Kafka Bus Architecture (`Central Agent <-> Kafka <-> Spoke Operators`)**.
 
 ---
 
-## 2. Defining Kafka Credentials & TLS / mTLS Certificates (CN Validation)
+## 1. Direct Kafka Bus Architecture (No RHACM Telemetry Dependency)
 
-The Operator secures Kafka connections using **mTLS (Mutual TLS)** or **SASL_SSL**. Certificates and CN validation settings are injected via a Kubernetes Secret mounted into the Operator deployment.
+In this architecture, **RHACM is not needed in the runtime telemetry loop**. Every cluster — including the RHACM management cluster itself — runs a local `drift-operator` and communicates directly over Kafka.
 
-### Kubernetes Secret Specification (`kafka-secret.yaml`)
+```
+                            ┌─────────────────────────────────┐
+                            │        CENTRAL SRE AGENT        │
+                            │ (LangGraph + LLM + SQLite Cache)│
+                            └────────────────┬────────────────┘
+                                             │
+                  ┌──────────────────────────┴──────────────────────────┐
+                  │ Publishes Validation / Consumes Spoke Telemetry     │
+                  ▼                                                     ▼
+     [ Topic: gitops.change.validation ]                [ Topic: gitops.spoke.reports ]
+                  │                                                     ▲
+                  │                                                     │
+                  │   ┌─────────────────────────────────────────────────┤
+                  │   │ (Each Spoke Operator publishes local report)     │
+                  ▼   │                                                 │
+   ┌──────────────────┴─────┐         ┌────────────────────────┐       ┌┴───────────────────────┐
+   │ SPOKE CLUSTER 1        │         │ SPOKE CLUSTER 2        │       │ RHACM CLUSTER          │
+   │ [ drift-operator ]     │         │ [ drift-operator ]     │       │ [ drift-operator ]     │
+   │ (Baremetal Virt)       │         │ (Baremetal Virt)       │       │ (Treated as Spoke #3)  │
+   └────────────────────────┘         └────────────────────────┘       └────────────────────────┘
+```
+
+---
+
+## 2. Topic Architecture: 3 Key Kafka Topics
+
+| Topic Name | Direction | Publisher | Consumer | Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| **`gitops.chg.events`** | Ingestion | ServiceNow / CI/CD / GitHub Webhooks | Central SRE Agent | Triggers maintenance windows (`CHG0012345`) and release tag validation (`v2.4.0`). |
+| **`gitops.spoke.reports`** | Telemetry | Spoke Operators (including RHACM Hub) | Central SRE Agent | Spoke operators stream local `ClusterAppReport` JSON snapshots (health, sync, MCP status, log snippets). |
+| **`gitops.change.validation`** | Emission | Central SRE Agent | SRE ChatOps / Dashboards / ITSM | Central Agent publishes final LLM-synthesized validation reports. |
+
+---
+
+## 3. Defining Credentials & TLS / mTLS Certificates (CN Validation)
+
+All spoke operators and the Central Agent secure Kafka connections using **mTLS (Mutual TLS)** with Common Name (CN) / SAN hostname verification.
+
+### Kubernetes Secret Specification (`drift-operator-kafka-certs`)
 
 ```yaml
 apiVersion: v1
@@ -52,6 +60,7 @@ stringData:
   KAFKA_SECURITY_PROTOCOL: "SSL" # or SASL_SSL
   KAFKA_SASL_MECHANISM: "SCRAM-SHA-512"
   KAFKA_INGEST_TOPIC: "gitops.chg.events"
+  KAFKA_SPOKE_REPORTS_TOPIC: "gitops.spoke.reports"
   KAFKA_EMIT_TOPIC: "gitops.change.validation"
   KAFKA_SERVER_NAME: "kafka-cluster.company.com" # Common Name (CN) / SAN Validation
 data:
@@ -60,56 +69,11 @@ data:
   tls.key: <BASE64_ENCODED_CLIENT_PRIVATE_KEY>
 ```
 
-### Operator Volume Mounts (`config/manager/manager.yaml` snippet)
-
-```yaml
-spec:
-  containers:
-    - name: manager
-      image: drift-operator:latest
-      envFrom:
-        - secretRef:
-            name: drift-operator-kafka-certs
-      volumeMounts:
-        - name: kafka-certs
-          mountPath: /etc/kafka/certs
-          readOnly: true
-  volumes:
-    - name: kafka-certs
-      secret:
-        secretName: drift-operator-kafka-certs
-```
-
-### Go TLS Config with CN Validation (`kafka_bridge.go` logic)
-
-```go
-func NewKafkaTLSConfig(caCertPath, clientCertPath, clientKeyPath, serverCN string) (*tls.Config, error) {
-    caCert, err := os.ReadFile(caCertPath)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read CA cert: %w", err)
-    }
-    caCertPool := x509.NewCertPool()
-    caCertPool.AppendCertsFromPEM(caCert)
-
-    cert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
-    if err != nil {
-        return nil, fmt.Errorf("failed to load client cert key pair: %w", err)
-    }
-
-    return &tls.Config{
-        Certificates:       []tls.Certificate{cert},
-        RootCAs:            caCertPool,
-        ServerName:         serverCN, // Common Name (CN) / SAN Hostname Verification
-        InsecureSkipVerify: false,    // Enforce strict TLS CN verification
-    }, nil
-}
-```
-
 ---
 
-## 3. Ingestion Event Format (`gitops.chg.events`)
+## 4. Topic 1: CHG Maintenance Ingestion Payload (`gitops.chg.events`)
 
-What the Operator **picks up / consumes** from Kafka:
+Published by ServiceNow or CI/CD to start a maintenance window:
 
 ```json
 {
@@ -126,54 +90,29 @@ What the Operator **picks up / consumes** from Kafka:
   "gitDetails": {
     "repository": "https://github.com/my-org/gitops-standards-repo",
     "releaseTag": "v2.4.0",
-    "expectedRevision": "a1b2c3d98f7e6c5b4a3f2e1d",
-    "baselineRevision": "f9e8d7c6b5a43210fe987654",
-    "changedFiles": [
-      "components/networking/base/kustomization.yaml",
-      "groups/prod/kustomization.yaml"
-    ]
+    "expectedRevision": "a1b2c3d98f7e6c5b4a3f2e1d"
   },
   "blastRadius": {
     "rootApp": "platform-root",
-    "impactedApps": [
-      "svc-payments",
-      "svc-networking"
-    ],
-    "targetClusters": [
-      "us-east-01",
-      "us-east-02",
-      "eu-west-01"
-    ]
-  },
-  "remediationPolicy": {
-    "hardRefresh": {
-      "maxAttempts": 2,
-      "waitBetweenSeconds": 180,
-      "actionExecutionMode": "Parked"
-    }
+    "impactedApps": ["svc-payments", "svc-networking"],
+    "targetClusters": ["us-east-01", "us-east-02", "rhacm-hub-01"]
   }
 }
 ```
 
 ---
 
-## 4. Emission Event Format (`gitops.change.validation`)
+## 5. Topic 2: Spoke Telemetry Payload (`gitops.spoke.reports`)
 
-What the Operator **sends back / produces** to Kafka:
+Published by **every spoke operator** (including the RHACM cluster):
 
 ```json
 {
-  "chgNumber": "CHG0012345",
-  "releaseTag": "v2.4.0",
-  "expectedRevision": "a1b2c3d98f7e6c5b4a3f2e1d",
-  "reportGeneratedAt": "2026-08-10T04:00:00Z",
-  "window": {
-    "start": "2026-08-10T02:00:00Z",
-    "end": "2026-08-10T04:00:00Z"
-  },
-  "phase": "Validated",
-  "overallStatus": "Good",
-  "rootApp": "platform-root",
+  "clusterName": "rhacm-hub-01",
+  "appName": "svc-payments",
+  "observedRevision": "a1b2c3d98f7e6c5b4a3f2e1d",
+  "syncStatus": "Synced",
+  "health": "Healthy",
   "mcpStatus": {
     "name": "virt",
     "machineCount": 16,
@@ -182,8 +121,25 @@ What the Operator **sends back / produces** to Kafka:
     "degradedNodeCount": 0,
     "phase": "Updated"
   },
-  "silentClusters": [],
-  "actionsApplied": [],
+  "observedAt": "2026-08-10T02:15:00Z",
+  "tailLogs": []
+}
+```
+
+---
+
+## 6. Topic 3: Central LLM Validation Report Payload (`gitops.change.validation`)
+
+Published by the **Central SRE Agent** after evaluating spoke reports:
+
+```json
+{
+  "chgNumber": "CHG0012345",
+  "releaseTag": "v2.4.0",
+  "expectedRevision": "a1b2c3d98f7e6c5b4a3f2e1d",
+  "reportGeneratedAt": "2026-08-10T04:00:00Z",
+  "phase": "Validated",
+  "overallStatus": "Good",
   "validation": {
     "allChangesApplied": true,
     "healthCheckPassed": true,

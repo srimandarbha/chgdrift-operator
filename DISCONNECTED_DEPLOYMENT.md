@@ -1,6 +1,6 @@
 # Disconnected Baremetal Deployment & Red Hat CoP GitOps Integration Guide
 
-This guide provides an end-to-end operational workflow to **build, unit test, containerize, push to an internal Nexus Container Registry, and deploy `drift-operator`** across disconnected baremetal OpenShift clusters using the [Red Hat CoP GitOps Standards Repo Template](https://github.com/redhat-cop/gitops-standards-repo-template).
+This guide provides an end-to-end operational workflow to **build, unit test, containerize, push to an internal Nexus Container Registry, store diagnostic evidence in a Nexus Raw Repository, and deploy `drift-operator`** across disconnected baremetal OpenShift clusters using the [Red Hat CoP GitOps Standards Repo Template](https://github.com/redhat-cop/gitops-standards-repo-template).
 
 ---
 
@@ -14,21 +14,21 @@ This guide provides an end-to-end operational workflow to **build, unit test, co
                                      │
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ PHASE 2: Container Build & Push to Internal Nexus                        │
+│ PHASE 2: Container Build & Push to Internal Nexus Docker Registry        │
 │  - `docker build -t nexus.company.com:8082/.../drift-operator:v1.0.0 .`  │
 │  - `docker push nexus.company.com:8082/.../drift-operator:v1.0.0`        │
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      │
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ PHASE 3: Integrate Manifests into Red Hat CoP GitOps Standards Repo      │
-│  - Structure under `components/operators/drift-operator/`                │
+│ PHASE 3: Configure Nexus Raw Repository for Diagnostic Log Evidence      │
+│  - Host: `https://nexus.company.com:8081/repository/gitops-evidence/`    │
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      │
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ PHASE 4: Kustomize Image Override for Air-Gapped Nexus URL               │
-│  - Map `drift-operator:latest` -> `nexus.company.com:8082/...:v1.0.0`    │
+│ PHASE 4: Integrate Manifests into Red Hat CoP GitOps Standards Repo      │
+│  - Structure under `components/operators/drift-operator/`                │
 └────────────────────────────────────┬─────────────────────────────────────┘
                                      │
                                      ▼
@@ -84,7 +84,20 @@ docker push nexus.company.com:8082/gitops-fleet/drift-operator:v1.0.0
 
 ---
 
-## Phase 3: Structure Operator Manifests inside Red Hat CoP GitOps Repo
+## Phase 3: Configure Internal Nexus Raw Repository for Log Evidence
+
+Instead of external S3 cloud storage, air-gapped baremetal deployments use an internal **Nexus Raw Repository** for storing 500-line pod diagnostic logs:
+
+1. **Create Repository**: In Sonatype Nexus Repository Manager, create a **Raw (Hosted)** repository named `gitops-evidence`.
+2. **Set Permissions**: Enable HTTP Basic Auth for `PUT` uploads by operators and **Anonymous Read** for browser log inspection by SREs.
+3. **Log Storage URL Structure**:
+   ```text
+   https://nexus.company.com:8081/repository/gitops-evidence/{CHG_NUMBER}/{CLUSTER}-{APP}-attempt-{ATTEMPT}.log
+   ```
+
+---
+
+## Phase 4: Structure Operator Manifests inside Red Hat CoP GitOps Repo
 
 Inside your organizational clone of [redhat-cop/gitops-standards-repo-template](https://github.com/redhat-cop/gitops-standards-repo-template), structure the operator manifests under the `components/` directory:
 
@@ -118,29 +131,7 @@ gitops-standards-repo/
         └── kustomization.yaml               <── Includes components/operators/drift-operator/overlays/prod
 ```
 
-### `components/operators/drift-operator/base/kustomization.yaml`
-
-```yaml
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: gitops-fleet
-resources:
-  - crds/gitops.example.com_clusterappreports.yaml
-  - crds/gitops.example.com_propagationstatuses.yaml
-  - crds/gitops.example.com_changewindows.yaml
-  - rbac/service_account.yaml
-  - rbac/role.yaml
-  - rbac/role_binding.yaml
-  - rbac/leader_election_role.yaml
-  - rbac/leader_election_role_binding.yaml
-  - manager/manager.yaml
-```
-
----
-
-## Phase 4: Configure Kustomize Image Override for Internal Nexus
-
-In `components/operators/drift-operator/overlays/prod/kustomization.yaml`, set the image override to pull from Nexus:
+### `components/operators/drift-operator/overlays/prod/kustomization.yaml`
 
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -158,7 +149,7 @@ images:
 
 ## Phase 5: Commit to Git & Auto-Sync via Argo CD
 
-1. Commit and push the new component to your Red Hat CoP GitOps repository:
+Commit and push the component to your Red Hat CoP GitOps repository:
 
 ```bash
 git add components/operators/drift-operator groups/prod/kustomization.yaml
@@ -166,7 +157,7 @@ git commit -m "feat(gitops): Add drift-operator component pointing to internal N
 git push origin main
 ```
 
-2. Argo CD automatically detects the commit on `main`, processes the `bootstrap/` ApplicationSet, creates the `gitops-fleet` namespace, applies the CRDs and RBAC, pulls `nexus.company.com:8082/gitops-fleet/drift-operator:v1.0.0`, and deploys the OpenShift `restricted-v2` SCC pod!
+Argo CD automatically detects the commit on `main`, processes the `bootstrap/` ApplicationSet, creates the `gitops-fleet` namespace, applies the CRDs and RBAC, pulls `nexus.company.com:8082/gitops-fleet/drift-operator:v1.0.0`, and deploys the OpenShift `restricted-v2` SCC pod!
 
 ---
 
@@ -180,7 +171,6 @@ oc get pods -n gitops-fleet
 
 # 2. Verify OpenShift Security Context Constraint (SCC) allocation
 oc describe pod -l control-plane=controller-manager -n gitops-fleet | grep -i scc
-# Output should show: openshift.io/scc: restricted-v2
 
 # 3. Check Leader Election Lease acquisition
 oc get leases -n gitops-fleet
