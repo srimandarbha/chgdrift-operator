@@ -1,38 +1,43 @@
-# Local Testing Guide (Docker & Kubernetes)
+# Local Testing Guide for Docker Desktop Kubernetes
 
-This guide provides step-by-step instructions for testing the **`drift-operator`** in a local Docker-based Kubernetes cluster using either **`kind` (Kubernetes in Docker)** or **`make run` (Local Out-of-Cluster Execution)**.
+This guide details how to build, deploy, and test **`drift-operator`** locally on your laptop using **Docker Desktop Kubernetes** (Windows / macOS).
 
 ---
 
-## Method 1: Local Testing in `kind` (Kubernetes in Docker)
+## Why Docker Desktop Makes Testing Easy
 
-This method tests the containerized operator inside a local Kubernetes cluster running on Docker.
+Docker Desktop shares its local image store directly with its built-in Kubernetes cluster. Any image you build using `docker build -t drift-operator:latest .` is **instantly available to Kubernetes** — no registry push, no `kind load`, and no external network calls required!
 
-### 1. Create a `kind` Cluster
+---
 
-```bash
-kind create cluster --name drift-test
+## Method 1: Containerized Local Testing in Docker Desktop
+
+### Step 1: Verify Docker Desktop Kubernetes is Active
+
+1. Open Docker Desktop Settings -> **Kubernetes** -> Ensure **Enable Kubernetes** is checked.
+2. Set your `kubectl` context to Docker Desktop:
+
+```cmd
+kubectl config use-context docker-desktop
 ```
 
-### 2. Build & Load Container Image
+### Step 2: Build Image Locally
 
-Build the local image and load it directly into `kind` (no container registry needed):
+Build the container image. It will land directly in Docker Desktop's local engine:
 
-```bash
-# 1. Build local container image
+```cmd
 docker build -t drift-operator:latest .
-
-# 2. Load image into kind cluster node
-kind load docker-image drift-operator:latest --name drift-test
 ```
 
-### 3. Deploy Manifests & CRDs
+### Step 3: Deploy CRDs, RBAC, and Operator
 
-```bash
+Deploy manifests into Docker Desktop Kubernetes:
+
+```cmd
 # 1. Create target namespace
 kubectl create namespace gitops-fleet
 
-# 2. Install CRDs (ClusterAppReport, PropagationStatus, ChangeWindow)
+# 2. Apply CRDs (ClusterAppReport, PropagationStatus, ChangeWindow)
 kubectl apply -f config/crd/bases/
 
 # 3. Apply RBAC (ServiceAccount, Role, RoleBindings, Leader Election Leases)
@@ -42,26 +47,28 @@ kubectl apply -f config/rbac/
 kubectl apply -k config/manager/
 ```
 
+> **Note**: `config/manager/manager.yaml` uses `imagePullPolicy: IfNotPresent`, which forces Docker Desktop to use your local `drift-operator:latest` image directly!
+
 ---
 
 ## Method 2: Rapid Local Execution (`make run`)
 
-If you want to run the Go binary directly on your machine without containerizing:
+If you want to run the Go binary directly on your laptop without building containers:
 
-```bash
-# 1. Ensure your KUBECONFIG points to your local Docker Desktop / Minikube cluster
-kubectl config current-context
+```cmd
+# 1. Ensure KUBECONFIG points to Docker Desktop
+kubectl config use-context docker-desktop
 
-# 2. Install CRDs to cluster
+# 2. Install CRDs into Docker Desktop
 make install
 
-# 3. Run operator binary locally
+# 3. Run operator binary locally on your laptop
 make run
 ```
 
 ---
 
-## Step 4: Apply Mock Sample CRs to Test Reconcilers
+## Step 4: Apply Sample Custom Resources to Test Reconcilers
 
 Create test custom resources in `gitops-fleet` namespace to trigger reconciliation:
 
@@ -91,7 +98,7 @@ spec:
     phase: Updated
 ```
 
-```bash
+```cmd
 kubectl apply -f sample-report.yaml
 ```
 
@@ -111,7 +118,7 @@ spec:
     - us-east-02
 ```
 
-```bash
+```cmd
 kubectl apply -f sample-propagation.yaml
 ```
 
@@ -135,40 +142,21 @@ spec:
   staleReportThresholdSeconds: 300
 ```
 
-```bash
+```cmd
 kubectl apply -f sample-changewindow.yaml
 ```
 
 ---
 
-## Step 5: Verify Reconciliation Results & Logs
+## Step 5: Verify Reconciliation Results & View Logs
 
-### 1. Inspect `PropagationStatus`
-
-```bash
+```cmd
+# 1. Inspect fleet propagation status
 kubectl get propagationstatus svc-payments -n gitops-fleet -o yaml
-```
-> **Expected Status Output**: `us-east-01` shows `InSync`, `us-east-02` shows in `missingClusters`, and `phase: Propagating`.
 
-### 2. Inspect `ChangeWindow` Validation Report
-
-```bash
+# 2. Inspect ChangeWindow validation report
 kubectl get changewindow chg0012345 -n gitops-fleet -o yaml
-```
-> **Expected Validation Output**:
-> ```yaml
-> status:
->   phase: Validated
->   overallStatus: Good
->   validation:
->     allChangesApplied: false # us-east-02 missing
->     healthCheckPassed: true
->     mcpUpdatedOnTime: true
->     passed: false
-> ```
 
-### 3. Check Operator Logs
-
-```bash
+# 3. Stream live operator logs from Docker Desktop
 kubectl logs -f deployment/controller-manager -c manager -n gitops-fleet
 ```

@@ -31,6 +31,7 @@ spec:
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8080
         image: drift-operator:latest
+        imagePullPolicy: IfNotPresent
         name: manager
         securityContext:
           allowPrivilegeEscalation: false
