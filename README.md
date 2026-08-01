@@ -67,6 +67,7 @@ drift-operator/
 
 ## Documentation & Integration Guides
 
+- **[LOCAL_TESTING.md](LOCAL_TESTING.md)** — Step-by-step local testing guide using `kind` (Kubernetes in Docker) & `make run`.
 - **[DISCONNECTED_DEPLOYMENT.md](DISCONNECTED_DEPLOYMENT.md)** — Step-by-step air-gapped baremetal OpenShift deployment, internal Nexus image mirroring, & restricted-v2 SCC guide.
 - **[KAFKA_INTEGRATION.md](KAFKA_INTEGRATION.md)** — Ingestion & emission Kafka topics, TLS/mTLS certificate (CN validation) setup, and JSON event schemas.
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** — Step-by-step 4-stage guide for adding new APIs, CRDs, and controllers.
