@@ -54,10 +54,12 @@ package controller
 
 import (
     "context"
+    "reflect"
     "time"
     apierrors "k8s.io/apimachinery/pkg/api/errors"
     ctrl "sigs.k8s.io/controller-runtime"
     "sigs.k8s.io/controller-runtime/pkg/client"
+    ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
     "sigs.k8s.io/controller-runtime/pkg/log"
     gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 )
@@ -80,7 +82,25 @@ func (r *MyNewKindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
         return ctrl.Result{}, nil
     }
 
-    // Reconcile logic...
+    original := obj.DeepCopy()
+
+    // Always use client.Limit(100) on list queries
+    var childList gitopsv1alpha1.ClusterAppReportList
+    if err := r.List(ctx, &childList, client.InNamespace(obj.Namespace), client.Limit(100)); err != nil {
+        return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+    }
+
+    // Mutate obj.Status...
+
+    // Rule 4: Patch status independently only if status has changed
+    if !reflect.DeepEqual(original.Status, obj.Status) {
+        if err := r.Status().Patch(ctx, &obj, client.MergeFrom(original)); err != nil {
+            if apierrors.IsConflict(err) {
+                return ctrl.Result{Requeue: true}, nil
+            }
+            return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+        }
+    }
 
     return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
@@ -88,6 +108,7 @@ func (r *MyNewKindReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *MyNewKindReconciler) SetupWithManager(mgr ctrl.Manager) error {
     return ctrl.NewControllerManagedBy(mgr).
         For(&gitopsv1alpha1.MyNewKind{}).
+        WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 5}).
         Complete(r)
 }
 ```

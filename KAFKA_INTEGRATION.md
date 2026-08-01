@@ -100,6 +100,10 @@ Published by ServiceNow or CI/CD to start a maintenance window:
 }
 ```
 
+### Consumer Error Handling & Retry Guarantees (`internal/kafka/kafka_bridge.go`)
+- **At-Least-Once Delivery**: Upon receiving `CHG_INITIATED` events, `KafkaBridge.Start()` attempts to create the corresponding `ChangeWindow` custom resource.
+- **Context-Aware Retry Loop**: If `kb.Client.Create` encounters a transient Kubernetes API error (e.g. API server downtime or webhooks unavailable), the consumer retries creation with a 2-second backoff while listening for `ctx.Done()`. Offsets are committed to Kafka **only after** creation succeeds (or if the resource already exists), ensuring zero event loss during cluster degradation.
+
 ---
 
 ## 5. Topic 2: Spoke Telemetry Payload (`gitops.spoke.reports`)

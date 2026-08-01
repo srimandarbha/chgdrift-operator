@@ -50,7 +50,7 @@ drift-operator/
   - `PropagationStatus`: Managed by central operator to aggregate fleet status (`InSync`, `Propagating`, `Lagging`, `Diverged`, `Stale`, `Missing`).
   - `ChangeWindow`: Manages CHG maintenance windows, maintenance silence, log collection, MCP rollout tracking, and Kafka reporting.
 - **Real Kafka Integration (`internal/kafka/kafka_bridge.go`)**:
-  - Ingests `CHG_INITIATED` events from topic `gitops.chg.events` to dynamically create `ChangeWindow` CRs.
+  - Ingests `CHG_INITIATED` events from topic `gitops.chg.events` to dynamically create `ChangeWindow` CRs with context-aware retry loops to guarantee zero message loss on K8s API server downtime.
   - Emits LLM-understandable validation reports to topic `gitops.change.validation`.
   - Full mTLS & TLS Common Name (CN) / SAN hostname verification (`InsecureSkipVerify: false`).
 - **OpenShift Virtualization & MCP Rollout Tracking**:
@@ -58,12 +58,13 @@ drift-operator/
   - Operates in a **Forward-Fix Only Paradigm** (`v2.4.0` $\rightarrow$ `v2.4.1`) without attempting destructive rollbacks on VMs or persistent volumes.
 - **6 Post-Deployment Health Checks**:
   - Asserts `allChangesApplied`, `healthCheckPassed`, `mcpUpdatedOnTime`, `noSilence`, `noExhausted`, and `/healthz` & `/readyz` probes.
+  - Dynamic maintenance silence classification (`sawReportSinceChgStart`) comparing report timestamps (`ObservedAt`) to window `StartTime`.
 - **Log-First Diagnostics (Simulated Capped Inline Logs)**:
   - Captures tail 500 lines from failing pods, capping inline JSON logs (max 20 lines / 2 KB) with S3 pointers (`logRef`). Inline logs explicitly labeled `SIMULATED (stub)`.
 - **OpenShift `restricted-v2` SCC Compliant Deployment**:
   - Deployment manifest in `config/manager/manager.yaml` (`allowPrivilegeEscalation: false`, drop `ALL`, `seccompProfile: RuntimeDefault`, no fixed `runAsUser`).
 - **Operator Development Guidelines (`.agents/AGENTS.md`)**:
-  - Fully compliant with level-based idempotency, status patching via `client.MergeFrom()`, list pagination, field indexers, and leader election (`coordination.k8s.io` `leases`).
+  - Fully compliant with level-based idempotency, status patching with `reflect.DeepEqual` guards, `client.Limit(100)` list pagination, `r.Patch()` upserting, `MaxConcurrentReconciles: 5` rate control, field indexers, and leader election (`coordination.k8s.io` `leases`).
 
 ## Documentation & Integration Guides
 
