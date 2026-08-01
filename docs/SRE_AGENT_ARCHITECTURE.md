@@ -22,12 +22,11 @@ This document provides a complete guide for developing the **Central SRE Agent**
                                                       │
                                                       │ (Communicates via Shared Kafka Bus)
                                                       ▼
-                       ┌─────────────────────────────────────────────────────────────┐
-                       │                   SHARED KAFKA BUS                          │
-                       │  - Ingestion: gitops.chg.events                             │
-                       │  - Spoke Telemetry: gitops.spoke.reports                     │
-                       │  - Emission: gitops.change.validation                       │
-                       └──────────────────────────────┬──────────────────────────────┘
+                        ┌─────────────────────────────────────────────────────────────┐
+                        │              SHARED KAFKA BUS (2 TOPICS)                    │
+                        │  - Ingestion: gitops.chg.events                             │
+                        │  - Emission: gitops.change.validation                       │
+                        └──────────────────────────────┬──────────────────────────────┘
                                                       │
                     ┌─────────────────────────────────┼─────────────────────────────────┐
                     ▼                                 ▼                                 ▼
