@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 )
@@ -131,8 +132,9 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		spec.VMStatus = r.checkVMHealth(ctx, desc.Namespace, desc.AppName)
 	}
 
-	// MCP status is always cheap (a single unstructured Get).
-	spec.MCPStatus = r.readMachineConfigPool(ctx)
+	// MCP status is cheap (a single unstructured Get/List).
+	mcpPool := cm.Labels["gitops.example.com/mcp-pool"]
+	spec.MCPStatus = r.readMachineConfigPool(ctx, mcpPool)
 
 	if err := r.upsertReport(ctx, reportName, spec); err != nil {
 		if apierrors.IsConflict(err) {
@@ -216,6 +218,15 @@ func (r *LocalAppWatchReconciler) collectPodLogs(ctx context.Context, namespace,
 		return nil
 	}
 
+	// Fallback to app.kubernetes.io/name selector if app: appName returned zero pods
+	if len(podList.Items) == 0 {
+		_ = r.List(ctx, &podList,
+			client.InNamespace(namespace),
+			client.MatchingLabels{"app.kubernetes.io/name": appName},
+			client.Limit(100),
+		)
+	}
+
 	var lines []string
 	for i := range podList.Items {
 		pod := &podList.Items[i]
@@ -271,7 +282,7 @@ func (r *LocalAppWatchReconciler) objectChangesFromAnnotation(cm *corev1.ConfigM
 	if !ok || raw == "" {
 		return nil
 	}
-	// Parse a simple line format: "Kind/Name=changeType[:field1,field2]"
+	// Parse line format: "Kind/Name=changeType[:field1,field2]"
 	var results []gitopsv1alpha1.ObjectChangeSummary
 	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
 		parts := strings.SplitN(line, "=", 2)
@@ -282,10 +293,17 @@ func (r *LocalAppWatchReconciler) objectChangesFromAnnotation(cm *corev1.ConfigM
 		if len(kindName) != 2 {
 			continue
 		}
+		changeParts := strings.SplitN(parts[1], ":", 2)
+		changeType := changeParts[0]
+		var changedFields []string
+		if len(changeParts) > 1 && changeParts[1] != "" {
+			changedFields = strings.Split(changeParts[1], ",")
+		}
 		oc := gitopsv1alpha1.ObjectChangeSummary{
-			Kind:       kindName[0],
-			Name:       kindName[1],
-			ChangeType: parts[1],
+			Kind:          kindName[0],
+			Name:          kindName[1],
+			ChangeType:    changeType,
+			ChangedFields: changedFields,
 		}
 		results = append(results, oc)
 	}
@@ -488,17 +506,30 @@ func (r *LocalAppWatchReconciler) findActiveMigration(ctx context.Context, names
 // MachineConfigPool
 // -------------------------------------------------------------------------
 
-// readMachineConfigPool reads the MachineConfigPool status for the worker pool
-// (or a pool labelled gitops.example.com/mcp=true). Uses the unstructured
-// client to avoid importing OpenShift's MCO SDK.
-func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context) gitopsv1alpha1.MachineConfigPoolStatus {
+// readMachineConfigPool reads the MachineConfigPool status for preferredPool,
+// "virt", or "worker" pool. Uses unstructured client to avoid importing MCO SDK.
+func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, preferredPool string) gitopsv1alpha1.MachineConfigPoolStatus {
+	poolsToTry := []string{}
+	if preferredPool != "" {
+		poolsToTry = append(poolsToTry, preferredPool)
+	}
+	poolsToTry = append(poolsToTry, "virt", "worker")
+
 	mcp := &unstructured.Unstructured{}
 	mcp.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "machineconfiguration.openshift.io",
 		Version: "v1",
 		Kind:    "MachineConfigPool",
 	})
-	if err := r.Get(ctx, types.NamespacedName{Name: "worker"}, mcp); err != nil {
+
+	var targetPool string
+	for _, poolName := range poolsToTry {
+		if err := r.Get(ctx, types.NamespacedName{Name: poolName}, mcp); err == nil {
+			targetPool = poolName
+			break
+		}
+	}
+	if targetPool == "" {
 		return gitopsv1alpha1.MachineConfigPoolStatus{}
 	}
 
@@ -516,7 +547,7 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context) git
 	}
 
 	return gitopsv1alpha1.MachineConfigPoolStatus{
-		Name:              "worker",
+		Name:              targetPool,
 		MachineCount:      int32(machineCount),
 		UpdatedNodeCount:  int32(updatedCount),
 		UpdatingNodeCount: int32(updatingCount),
@@ -580,6 +611,9 @@ func (r *LocalAppWatchReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// Watch ConfigMaps labelled as app descriptors.
 		For(&corev1.ConfigMap{}).
+		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+			return obj.GetLabels()[AppLabelKey] != ""
+		})).
 		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 5}).
 		Complete(r)
 }

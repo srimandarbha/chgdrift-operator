@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: drift-operator-spoke
+  namespace: gitops-fleet
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: drift-operator-spoke-role
+rules:
+  # App descriptor ConfigMaps -- read-only is enough; nothing writes these
+  # from the operator side.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+
+  # Warning events for the app's namespace(s).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+  # Pod status (to find non-Ready pods) and their logs.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Dependency checks (ConfigMap already covered above).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+
+  # ClusterAppReport is the only thing this SA is allowed to write.
+  - apiGroups: ["gitops.example.com"]
+    resources: ["clusterappreports"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+  # OpenShift Virtualization objects (KubeVirt + CDI), read-only.
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines", "virtualmachineinstances", "virtualmachineinstancemigrations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["datavolumes"]
+    verbs: ["get", "list", "watch"]
+
+  # MachineConfigPool is cluster-scoped.
+  - apiGroups: ["machineconfiguration.openshift.io"]
+    resources: ["machineconfigpools"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: drift-operator-spoke-binding
+subjects:
+  - kind: ServiceAccount
+    name: drift-operator-spoke
+    namespace: gitops-fleet
+roleRef:
+  kind: ClusterRole
+  name: drift-operator-spoke-role
+  apiGroup: rbac.authorization.k8s.io

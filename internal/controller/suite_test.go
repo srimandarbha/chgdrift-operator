@@ -344,3 +344,24 @@ func TestLocalAppWatchReconciler(t *testing.T) {
 		t.Fatalf("unexpected reconcile error on update: %v", err)
 	}
 }
+
+func TestObjectChangesFromAnnotation(t *testing.T) {
+	r := &LocalAppWatchReconciler{}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"gitops.example.com/last-sync-resources": "Deployment/payments-api=Updated:spec.template.spec.containers,metadata.labels\nService/payments-svc=Created",
+			},
+		},
+	}
+	changes := r.objectChangesFromAnnotation(cm)
+	if len(changes) != 2 {
+		t.Fatalf("expected 2 object changes, got %d", len(changes))
+	}
+	if changes[0].ChangeType != "Updated" || len(changes[0].ChangedFields) != 2 {
+		t.Errorf("expected ChangeType 'Updated' and 2 changed fields, got %+v", changes[0])
+	}
+	if changes[1].ChangeType != "Created" || len(changes[1].ChangedFields) != 0 {
+		t.Errorf("expected ChangeType 'Created' and 0 changed fields, got %+v", changes[1])
+	}
+}
