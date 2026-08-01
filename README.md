@@ -39,6 +39,12 @@ drift-operator/
 - **OpenShift Virtualization Forward-Fix Paradigm**: Designed for forward-fix workflows (`v2.4.0` $\rightarrow$ `v2.4.1`) without attempting destructive rollbacks on VMs or hypervisor MachineConfigs.
 - **Operator Development Guidelines (`.agents/AGENTS.md`)**: Fully compliant with level-based idempotency, status patching via `client.MergeFrom()`, list pagination, field indexers, and leader election.
 
+## Documentation & Integration Guides
+
+- **[KAFKA_INTEGRATION.md](KAFKA_INTEGRATION.md)** — Ingestion & emission Kafka topics, TLS/mTLS certificate (CN validation) setup, and JSON event schemas.
+- **[DEVELOPMENT.md](DEVELOPMENT.md)** — Step-by-step 4-stage guide for adding new APIs, CRDs, and controllers.
+- **[.agents/AGENTS.md](.agents/AGENTS.md)** — Production Operator Development Guidelines.
+
 ## Building & Running
 
 ```bash
