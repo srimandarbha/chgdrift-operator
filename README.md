@@ -67,6 +67,7 @@ drift-operator/
 
 ## Documentation & Integration Guides
 
+- **[SRE_AGENT_ARCHITECTURE.md](SRE_AGENT_ARCHITECTURE.md)** — Autonomous Edge SRE Agent design, GitHub PR/Tag API integration, embedded DB caching, & LangGraph state graph.
 - **[LOCAL_TESTING.md](LOCAL_TESTING.md)** — Step-by-step local testing guide using `kind` (Kubernetes in Docker) & `make run`.
 - **[DISCONNECTED_DEPLOYMENT.md](DISCONNECTED_DEPLOYMENT.md)** — Step-by-step air-gapped baremetal OpenShift deployment, internal Nexus image mirroring, & restricted-v2 SCC guide.
 - **[KAFKA_INTEGRATION.md](KAFKA_INTEGRATION.md)** — Ingestion & emission Kafka topics, TLS/mTLS certificate (CN validation) setup, and JSON event schemas.
