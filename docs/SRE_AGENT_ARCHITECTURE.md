@@ -14,7 +14,7 @@ This document provides a complete guide for developing the **Central SRE Agent**
                        │      - Receives GitHub Webhooks (`main`/`sit` merges)       │
                        │      - Interacts with GitHub REST API (PRs, Tags, Diffs)    │
                        │      - Consumes Kafka CHG Events (`CHG0012345`)              │
-                       │      - Stores PR & State Cache in Embedded SQLite DB        │
+                       │      - Stores PR & State Cache in PostgreSQL DB (Flat Tables + pgvector RAG) │
                        │      - Executes LangGraph LLM Root Cause Analysis           │
                        │      - Commits Log Evidence to `gitops-evidence-repo`       │
                        │      - Posts Adaptive Cards directly to MS Teams            │
@@ -51,7 +51,7 @@ sre-agent/
 │   ├── settings.py              # Environment variables & runtime credentials
 │   └── app_mapping.yaml         # Git path to App/Namespace/Cluster mapping
 ├── db/
-│   └── sqlite_cache.py          # SQLite database connection & PR cache queries
+│   └── postgres_db.py           # PostgreSQL connection (Flat tables + pgvector RAG queries)
 ├── git/
 │   └── github_client.py         # GitHub REST API client (PRs, diffs, tags, log evidence)
 ├── kafka_bus/
@@ -74,6 +74,8 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 langgraph>=0.0.30
 langchain-openai>=0.1.0
+psycopg2-binary>=2.9.9
+pgvector>=0.2.5
 kafka-python>=2.0.2
 requests>=2.31.0
 pyyaml>=6.0.1
@@ -132,7 +134,7 @@ mappings:
     mcp_pool: "worker"
 
 # Note: Virtual Machines (VMs) are out of scope of GitOps.
-# GitOps manages platform configurations (Deployments, ConfigMaps, Secrets, NetworkPolicies)
+# GitOps tracks Argo CD Applications, platform configurations (Deployments, ConfigMaps, Secrets, NetworkPolicies),
 # and MachineConfigPool rollout state.
 ```
 

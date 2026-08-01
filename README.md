@@ -58,8 +58,8 @@ drift-operator/
   - Ingests `CHG_INITIATED` events from topic `gitops.chg.events` to dynamically create `ChangeWindow` CRs with context-aware retry loops to guarantee zero message loss on K8s API server downtime.
   - Emits LLM-understandable validation reports to topic `gitops.change.validation`.
   - Full mTLS & TLS Common Name (CN) / SAN hostname verification (`InsecureSkipVerify: false`).
-- **OpenShift Infrastructure & MCP Rollout Tracking**:
-  - Virtual Machines (VMs) are **out of scope of GitOps**; `drift-operator` tracks GitOps-managed platform configurations (ConfigMaps, Secrets, Deployments, NetworkPolicies) and OpenShift `MachineConfigPoolStatus` (`mcpStatus`) for hypervisor node updates (drain $\rightarrow$ reboot $\rightarrow$ apply).
+- **Argo CD Applications & OpenShift Infrastructure Tracking**:
+  - Virtual Machines (VMs) are **out of scope of GitOps**; `drift-operator` tracks GitOps-managed **Argo CD Applications** and platform configurations (ConfigMaps, Secrets, Deployments, NetworkPolicies) as well as OpenShift `MachineConfigPoolStatus` (`mcpStatus`) for hypervisor node updates (drain $\rightarrow$ reboot $\rightarrow$ apply).
   - Operates in a **Forward-Fix Only Paradigm** (`v2.4.0` $\rightarrow$ `v2.4.1`) without attempting destructive rollbacks on infrastructure workloads or persistent volumes.
 - **6 Post-Deployment Health Checks**:
   - Asserts `allChangesApplied`, `healthCheckPassed`, `mcpUpdatedOnTime`, `eventsClean`, `objectsConverged`, and `dependenciesReady`.
