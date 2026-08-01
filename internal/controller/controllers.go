@@ -21,41 +21,42 @@ func SetupAllControllers(mgr ctrl.Manager, kafkaBridge *kafka.KafkaBridge) error
 	// writes ClusterAppReports from local ArgoCD/workload state.
 	clusterName := os.Getenv("CLUSTER_NAME")
 
-	controllers := []struct {
+	type reg struct {
 		name       string
 		controller Controller
-	}{
-		{
-			name: "PropagationStatus",
-			controller: &PropagationStatusReconciler{
-				Client:   mgr.GetClient(),
-				Recorder: mgr.GetEventRecorderFor("propagationstatus-controller"),
-			},
-		},
-		{
-			name: "ChangeWindow",
-			controller: &ChangeWindowReconciler{
-				Client:      mgr.GetClient(),
-				Recorder:    mgr.GetEventRecorderFor("changewindow-controller"),
-				KafkaBridge: kafkaBridge, // nil when Kafka is disabled — handled safely
-			},
-		},
 	}
+	var controllers []reg
 
-	// Register the spoke-side controller when running on a spoke cluster.
-	// The hub runs both reconcilers above; a dedicated spoke deployment sets
-	// CLUSTER_NAME and omits hub RBAC grants.
 	if clusterName != "" {
-		controllers = append(controllers, struct {
-			name       string
-			controller Controller
-		}{
-			name: "LocalAppWatch",
-			controller: &LocalAppWatchReconciler{
-				Client:      mgr.GetClient(),
-				ClusterName: clusterName,
+		// Spoke deployment mode: run ONLY the spoke-side telemetry controller.
+		controllers = []reg{
+			{
+				name: "LocalAppWatch",
+				controller: &LocalAppWatchReconciler{
+					Client:      mgr.GetClient(),
+					ClusterName: clusterName,
+				},
 			},
-		})
+		}
+	} else {
+		// Hub deployment mode: run fleet aggregation and change window controllers.
+		controllers = []reg{
+			{
+				name: "PropagationStatus",
+				controller: &PropagationStatusReconciler{
+					Client:   mgr.GetClient(),
+					Recorder: mgr.GetEventRecorderFor("propagationstatus-controller"),
+				},
+			},
+			{
+				name: "ChangeWindow",
+				controller: &ChangeWindowReconciler{
+					Client:      mgr.GetClient(),
+					Recorder:    mgr.GetEventRecorderFor("changewindow-controller"),
+					KafkaBridge: kafkaBridge, // nil when Kafka is disabled — handled safely
+				},
+			},
+		}
 	}
 
 	for _, c := range controllers {

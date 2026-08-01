@@ -62,6 +62,9 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// Rule 3: Deletion check
 	if !ps.DeletionTimestamp.IsZero() {
+		for _, cs := range ps.Status.ClusterStates {
+			metrics.DeleteClusterMetrics(ps.Spec.AppName, cs.ClusterName)
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -157,6 +160,17 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			Dependencies:  rep.Spec.Dependencies,
 		})
 		metrics.RecordClusterMetrics(ps.Spec.AppName, clusterName, state, state == StateInSync, lagSeconds, reportAge.Seconds())
+	}
+
+	// Clean up metrics for clusters removed from targetClusters
+	targetMap := make(map[string]bool, len(ps.Spec.TargetClusters))
+	for _, c := range ps.Spec.TargetClusters {
+		targetMap[c] = true
+	}
+	for _, cs := range original.Status.ClusterStates {
+		if !targetMap[cs.ClusterName] {
+			metrics.DeleteClusterMetrics(ps.Spec.AppName, cs.ClusterName)
+		}
 	}
 
 	ps.Status.ClusterStates = states

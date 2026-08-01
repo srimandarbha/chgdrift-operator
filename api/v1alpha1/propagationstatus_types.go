@@ -47,26 +47,7 @@ type DependencyRef struct {
 	Note string `json:"note,omitempty"`
 }
 
-// VMHealthStatus captures the runtime health of an OpenShift Virtualization VirtualMachine
-// during a CHG window. A VM whose spec changed but whose VMI hasn't restarted is a
-// common silent failure mode: ArgoCD shows Synced while the workload still runs the old config.
-type VMHealthStatus struct {
-	// Name is the VirtualMachine name.
-	Name string `json:"name"`
-	// Ready reflects VMI status.conditions[Ready].
-	Ready bool `json:"ready"`
-	// LiveMigratable reflects VMI status.conditions[LiveMigratable].
-	LiveMigratable bool `json:"liveMigratable"`
-	// RestartRequired is true when VM status.conditions[RestartRequired] is True —
-	// meaning the running VMI has not yet picked up a spec change.
-	RestartRequired bool `json:"restartRequired"`
-	// DataVolumesBound is true when all referenced DataVolumes have phase == Succeeded.
-	DataVolumesBound bool `json:"dataVolumesBound"`
-	// SnapshotReady is true when any referenced VirtualMachineSnapshot has status.readyToUse == true.
-	SnapshotReady bool `json:"snapshotReady,omitempty"`
-	// ActiveMigration is the name of any in-flight VirtualMachineInstanceMigration, empty otherwise.
-	ActiveMigration string `json:"activeMigration,omitempty"`
-}
+
 
 // ----------------------------------------------------------------------------
 // ClusterAppReport: one per (cluster, app). Written ONLY by the agent running
@@ -121,10 +102,6 @@ type ClusterAppReportSpec struct {
 	// Dependencies lists external resources that the application references and their readiness.
 	// +listType=atomic
 	Dependencies []DependencyRef `json:"dependencies,omitempty"`
-
-	// VMStatus contains OpenShift Virtualization health checks for VM-backed workloads.
-	// +listType=atomic
-	VMStatus []VMHealthStatus `json:"vmStatus,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -187,11 +164,6 @@ type ClusterRevisionState struct {
 	State string `json:"state"`
 
 	// Spoke-collected observability data relayed by the propagation aggregator.
-
-	// VMStatus contains OpenShift Virtualization health checks. A non-empty
-	// RestartRequired or ActiveMigration blocks the hub validation gate.
-	// +listType=atomic
-	VMStatus []VMHealthStatus `json:"vmStatus,omitempty"`
 
 	// RecentEvents is a de-duplicated list of Warning events from the app namespace.
 	// +listType=atomic
@@ -309,8 +281,6 @@ type ValidationResult struct {
 	ObjectsConverged bool `json:"objectsConverged"`
 	// DependenciesReady is true when all referenced ConfigMaps/Secrets/DataVolumes are ready.
 	DependenciesReady bool `json:"dependenciesReady"`
-	// VMChecksPassed is true when no VM has RestartRequired=true or an in-flight migration.
-	VMChecksPassed bool `json:"vmChecksPassed"`
 	// IssuesFound is a human-readable list of the failing checks.
 	// +listType=atomic
 	IssuesFound []string `json:"issuesFound,omitempty"`

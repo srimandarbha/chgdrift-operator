@@ -129,7 +129,6 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	eventsClean := true
 	objectsConverged := true
 	dependenciesReady := true
-	vmChecksPassed := true
 
 	for _, appStateMap := range chg.Status.AppStates {
 		for _, cs := range appStateMap.ClusterStates {
@@ -156,11 +155,6 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					dependenciesReady = false
 				}
 			}
-			for _, vm := range cs.VMStatus {
-				if vm.RestartRequired || vm.ActiveMigration != "" || !vm.DataVolumesBound {
-					vmChecksPassed = false
-				}
-			}
 		}
 	}
 
@@ -174,10 +168,9 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		EventsClean:       eventsClean,
 		ObjectsConverged:  objectsConverged,
 		DependenciesReady: dependenciesReady,
-		VMChecksPassed:    vmChecksPassed,
 		IssuesFound:       issuesFound,
 		Passed: allConverged && healthCheckPassed && mcpUpdatedOnTime &&
-			eventsClean && objectsConverged && dependenciesReady && vmChecksPassed && noSilence,
+			eventsClean && objectsConverged && dependenciesReady && noSilence,
 	}
 
 	previousPhase := chg.Status.Phase
@@ -370,21 +363,7 @@ func (r *ChangeWindowReconciler) buildIssuesList(chg *gitopsv1alpha1.ChangeWindo
 						appName, cs.ClusterName, dep.Kind, dep.Name, note))
 				}
 			}
-			// VM-specific checks (RestartRequired, ActiveMigration, DataVolumes)
-			for _, vm := range cs.VMStatus {
-				if vm.RestartRequired {
-					issues = append(issues, fmt.Sprintf("%s/%s: VM %s needs a restart to pick up its new spec",
-						appName, cs.ClusterName, vm.Name))
-				}
-				if vm.ActiveMigration != "" {
-					issues = append(issues, fmt.Sprintf("%s/%s: VM %s has an in-flight live migration (%s)",
-						appName, cs.ClusterName, vm.Name, vm.ActiveMigration))
-				}
-				if !vm.DataVolumesBound {
-					issues = append(issues, fmt.Sprintf("%s/%s: VM %s has unbound DataVolumes",
-						appName, cs.ClusterName, vm.Name))
-				}
-			}
+
 		}
 	}
 	for _, s := range chg.Status.SilentClusters {

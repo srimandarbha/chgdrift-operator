@@ -61,8 +61,6 @@ const (
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gitops.example.com,resources=clusterappreports,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines;virtualmachineinstances;virtualmachineinstancemigrations,verbs=get;list;watch
-// +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;list;watch
 type LocalAppWatchReconciler struct {
 	client.Client
 	// ClusterName is the stable spoke identifier injected via CLUSTER_NAME env var.
@@ -78,7 +76,6 @@ type AppDescriptor struct {
 	SyncStatus string // Synced | OutOfSync | Unknown — written by a sidecar/agent
 	Health     string // Healthy | Progressing | Degraded | Unknown
 	Revision   string // git commit SHA currently applied
-	IsVirtApp  bool   // true when this app manages VirtualMachine workloads
 }
 
 // Reconcile is triggered by ConfigMaps labelled "gitops.example.com/app-descriptor=true"
@@ -126,10 +123,6 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		spec.TailLogs = r.collectPodLogs(ctx, desc.Namespace, desc.AppName)
 		spec.ObjectChanges = r.objectChangesFromAnnotation(&cm)
 		spec.Dependencies = r.checkDependencies(ctx, desc.Namespace, &cm)
-	}
-
-	if desc.IsVirtApp {
-		spec.VMStatus = r.checkVMHealth(ctx, desc.Namespace, desc.AppName)
 	}
 
 	// MCP status is cheap (a single unstructured Get/List).
@@ -366,143 +359,6 @@ func (r *LocalAppWatchReconciler) isDataVolumeReady(ctx context.Context, namespa
 }
 
 // -------------------------------------------------------------------------
-// OpenShift Virtualization health checks
-// -------------------------------------------------------------------------
-
-func (r *LocalAppWatchReconciler) checkVMHealth(ctx context.Context, namespace, appName string) []gitopsv1alpha1.VMHealthStatus {
-	// List VirtualMachines in the namespace that belong to this app.
-	// Uses the unstructured client — no kubevirt.io/api dependency.
-	vmList := &unstructured.UnstructuredList{}
-	vmList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "kubevirt.io",
-		Version: "v1",
-		Kind:    "VirtualMachineList",
-	})
-	if err := r.List(ctx, vmList, client.InNamespace(namespace),
-		client.MatchingLabels{"app": appName}, client.Limit(100)); err != nil {
-		return nil
-	}
-
-	var results []gitopsv1alpha1.VMHealthStatus
-	for _, vmObj := range vmList.Items {
-		vmName := vmObj.GetName()
-		status := gitopsv1alpha1.VMHealthStatus{Name: vmName}
-
-		// VirtualMachineInstance (may not exist if VM is stopped).
-		vmi := &unstructured.Unstructured{}
-		vmi.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "kubevirt.io",
-			Version: "v1",
-			Kind:    "VirtualMachineInstance",
-		})
-		if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: vmName}, vmi); err == nil {
-			status.Ready = hasUnstructuredCondition(vmi, "Ready", "True")
-			status.LiveMigratable = hasUnstructuredCondition(vmi, "LiveMigratable", "True")
-		}
-
-		// VM-level RestartRequired condition — true when a spec change is pending VMI restart.
-		status.RestartRequired = hasUnstructuredCondition(&vmObj, "RestartRequired", "True")
-
-		// DataVolume binding: check all volumes that reference a DataVolume.
-		status.DataVolumesBound = r.allDataVolumesBound(ctx, namespace, &vmObj)
-
-		// VirtualMachineSnapshot readiness check.
-		status.SnapshotReady = r.isVMSnapshotReady(ctx, namespace, vmName)
-
-		// In-flight live migration for this VMI.
-		status.ActiveMigration = r.findActiveMigration(ctx, namespace, vmName)
-
-		results = append(results, status)
-	}
-	return results
-}
-
-// isVMSnapshotReady checks whether any VirtualMachineSnapshot referencing this VM is readyToUse.
-func (r *LocalAppWatchReconciler) isVMSnapshotReady(ctx context.Context, namespace, vmName string) bool {
-	snapList := &unstructured.UnstructuredList{}
-	snapList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "snapshot.kubevirt.io",
-		Version: "v1alpha1",
-		Kind:    "VirtualMachineSnapshotList",
-	})
-	if err := r.List(ctx, snapList, client.InNamespace(namespace), client.Limit(100)); err != nil {
-		return true // Optional check; assume true if CRD is not present
-	}
-	for _, snap := range snapList.Items {
-		specVM, _, _ := unstructured.NestedString(snap.Object, "spec", "source", "name")
-		if specVM == vmName {
-			readyToUse, _, _ := unstructured.NestedBool(snap.Object, "status", "readyToUse")
-			return readyToUse
-		}
-	}
-	return true
-}
-
-// hasUnstructuredCondition returns true when the object's status.conditions array
-// contains a condition of the given type with the given status string.
-func hasUnstructuredCondition(obj *unstructured.Unstructured, condType, condStatus string) bool {
-	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-	for _, raw := range conditions {
-		c, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if c["type"] == condType && c["status"] == condStatus {
-			return true
-		}
-	}
-	return false
-}
-
-// allDataVolumesBound checks that every DataVolume referenced by the VM's disk
-// volumes is in the "Succeeded" phase.
-func (r *LocalAppWatchReconciler) allDataVolumesBound(ctx context.Context, namespace string, vm *unstructured.Unstructured) bool {
-	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
-	for _, rawVol := range volumes {
-		vol, ok := rawVol.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		dvMap, _, _ := unstructured.NestedMap(vol, "dataVolume")
-		if len(dvMap) == 0 {
-			continue
-		}
-		dvName, _ := dvMap["name"].(string)
-		if dvName == "" {
-			continue
-		}
-		if !r.isDataVolumeReady(ctx, namespace, dvName) {
-			return false
-		}
-	}
-	return true
-}
-
-// findActiveMigration returns the name of any in-flight VMIM for the given VMI, or "".
-func (r *LocalAppWatchReconciler) findActiveMigration(ctx context.Context, namespace, vmiName string) string {
-	migList := &unstructured.UnstructuredList{}
-	migList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "kubevirt.io",
-		Version: "v1",
-		Kind:    "VirtualMachineInstanceMigrationList",
-	})
-	if err := r.List(ctx, migList, client.InNamespace(namespace), client.Limit(100)); err != nil {
-		return ""
-	}
-	for _, mig := range migList.Items {
-		specVMI, _, _ := unstructured.NestedString(mig.Object, "spec", "vmiName")
-		if specVMI != vmiName {
-			continue
-		}
-		phase, _, _ := unstructured.NestedString(mig.Object, "status", "phase")
-		if phase != "Succeeded" && phase != "Failed" {
-			return mig.GetName()
-		}
-	}
-	return ""
-}
-
-// -------------------------------------------------------------------------
 // MachineConfigPool
 // -------------------------------------------------------------------------
 
@@ -599,7 +455,6 @@ func parseDescriptor(cm *corev1.ConfigMap) AppDescriptor {
 		Health:     cm.Data["health"],
 		Revision:   cm.Data["observedRevision"],
 	}
-	desc.IsVirtApp = cm.Labels["gitops.example.com/virt-app"] == "true"
 	return desc
 }
 

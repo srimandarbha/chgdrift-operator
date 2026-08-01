@@ -38,14 +38,6 @@ rules:
     resources: ["clusterappreports"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 
-  # OpenShift Virtualization objects (KubeVirt + CDI), read-only.
-  - apiGroups: ["kubevirt.io"]
-    resources: ["virtualmachines", "virtualmachineinstances", "virtualmachineinstancemigrations"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["cdi.kubevirt.io"]
-    resources: ["datavolumes"]
-    verbs: ["get", "list", "watch"]
-
   # MachineConfigPool is cluster-scoped.
   - apiGroups: ["machineconfiguration.openshift.io"]
     resources: ["machineconfigpools"]

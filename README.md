@@ -53,11 +53,11 @@ drift-operator/
   - Ingests `CHG_INITIATED` events from topic `gitops.chg.events` to dynamically create `ChangeWindow` CRs with context-aware retry loops to guarantee zero message loss on K8s API server downtime.
   - Emits LLM-understandable validation reports to topic `gitops.change.validation`.
   - Full mTLS & TLS Common Name (CN) / SAN hostname verification (`InsecureSkipVerify: false`).
-- **OpenShift Virtualization & MCP Rollout Tracking**:
-  - Tracks `MachineConfigPoolStatus` (`mcpStatus`) for hypervisor node updates (drain $\rightarrow$ reboot $\rightarrow$ apply).
-  - Operates in a **Forward-Fix Only Paradigm** (`v2.4.0` $\rightarrow$ `v2.4.1`) without attempting destructive rollbacks on VMs or persistent volumes.
+- **OpenShift Infrastructure & MCP Rollout Tracking**:
+  - Virtual Machines (VMs) are **out of scope of GitOps**; `drift-operator` tracks GitOps-managed platform configurations (ConfigMaps, Secrets, Deployments, NetworkPolicies) and OpenShift `MachineConfigPoolStatus` (`mcpStatus`) for hypervisor node updates (drain $\rightarrow$ reboot $\rightarrow$ apply).
+  - Operates in a **Forward-Fix Only Paradigm** (`v2.4.0` $\rightarrow$ `v2.4.1`) without attempting destructive rollbacks on infrastructure workloads or persistent volumes.
 - **6 Post-Deployment Health Checks**:
-  - Asserts `allChangesApplied`, `healthCheckPassed`, `mcpUpdatedOnTime`, `noSilence`, `noExhausted`, and `/healthz` & `/readyz` probes.
+  - Asserts `allChangesApplied`, `healthCheckPassed`, `mcpUpdatedOnTime`, `eventsClean`, `objectsConverged`, and `dependenciesReady`.
   - Dynamic maintenance silence classification (`sawReportSinceChgStart`) comparing report timestamps (`ObservedAt`) to window `StartTime`.
 - **Log-First Diagnostics (Simulated Capped Inline Logs)**:
   - Captures tail 500 lines from failing pods, capping inline JSON logs (max 20 lines / 2 KB) with S3 pointers (`logRef`). Inline logs explicitly labeled `SIMULATED (stub)`.

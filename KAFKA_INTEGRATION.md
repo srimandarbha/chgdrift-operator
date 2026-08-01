@@ -148,6 +148,9 @@ Published by the **Central SRE Agent** after evaluating spoke reports:
     "allChangesApplied": true,
     "healthCheckPassed": true,
     "mcpUpdatedOnTime": true,
+    "eventsClean": true,
+    "objectsConverged": true,
+    "dependenciesReady": true,
     "issuesFound": [],
     "passed": true
   }
