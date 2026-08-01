@@ -1,185 +1,151 @@
-# Autonomous Change-Aware SRE Agent Architecture & Design
+# Centralized SRE Agent & Spoke Operator Architecture
 
-This document details the complete technical specification, state management, LangGraph AI workflow, GitHub integration, and rationale for the **Edge SRE Agent** working alongside the `drift-operator`.
-
----
-
-## 1. Purpose of the SRE Agent
-
-The **SRE Agent** is a lightweight, event-driven edge daemon running on downstream/spoke clusters (or central edge nodes). Its primary goals are:
-
-1. **Change Correlation**: Correlates live Git repository events (`main`/`sit` merges, release tags `v2.4.0`, PR file diffs) with local Kubernetes/OpenShift runtime state.
-2. **Health & MCP Monitoring**: Continuously monitors Argo CD application health (`Healthy`, `Degraded`) and OpenShift `MachineConfigPool` (MCP) node rollout state (`Updating`, `Updated`).
-3. **Log-First AI Diagnostics**: When a workload fails post-deployment, the Agent extracts tail pod logs, passes them to an LLM for Root Cause Analysis (RCA), and generates concise evidence.
-4. **Hub Reporting**: Writes structured `ClusterAppReport` Custom Resources to the central Hub cluster for `drift-operator` aggregation.
+This document details the topology where the **SRE Agent runs centrally** on the Hub control plane (with LangGraph, GitHub API, LLM, and SQLite DB), while the **`drift-operator` runs on each spoke cluster** as a native Kubernetes Go operator.
 
 ---
 
-## 2. Agent Inputs & Data Sources
-
-| Input Source | Channel / API | Data Extracted |
-| :--- | :--- | :--- |
-| **GitHub Repository** | Webhooks (`push` on `main`/`sit`) & GitHub REST API | Merge commit SHA, Release tag, Merged PR numbers, PR titles, authors, and changed file paths. |
-| **Local Kubernetes API** | `k8s.io/client-go` | Argo CD Application `syncStatus`, `health`, pod statuses, restart counts. |
-| **OpenShift MCO API** | `machineconfiguration.openshift.io/v1` | `MachineConfigPool` (`worker`, `virt`) `machineCount`, `updatedNodeCount`, `updatingNodeCount`, `degradedNodeCount`. |
-| **Pod Subresource API** | Core `v1` `/pods/{name}/log` | Tail 500 lines of container stderr/stdout on `CrashLoopBackOff` or `ImagePullBackOff`. |
-| **Local Cache / DB** | Embedded SQLite / PebbleDB | Cached GitHub PR metadata, commit history, and LangGraph checkpoint states. |
-
----
-
-## 3. Why LLM is Needed in the Agent
-
-### Where LLM is Used
-1. **Pod Log Summarization**: Synthesizing 500+ lines of raw container logs into a 2-line root cause (e.g. `"PostgreSQL authentication failed: password mismatch in secret db-credentials"`).
-2. **PR Diff vs. Incident Symptom Correlation**: Comparing changed files in the merged PR (e.g. `config/db-schema.yaml`) with the runtime exception to prove causality.
-3. **Structured RCA for Kafka Payload**: Producing clean, structured JSON summaries for SRE ChatOps and ticket creation.
-
-### Why LLM is Essential Over Traditional Rules/Regex
-* **Regex Brittleness**: Microservice error messages change across framework updates. Hardcoded regex cannot catch unexpected stack traces.
-* **Payload Size Constraints**: Raw logs cannot be sent over Kafka to etcd (1.5 MB limit) without causing `RecordTooLargeException`. The LLM compresses 50 KB of log text into a high-density 500-byte diagnostic summary.
-
----
-
-## 4. Why an Autonomous Agent Over Observability or Ansible Alone?
-
-| System | Primary Role | Why It Cannot Replace the Agent |
-| :--- | :--- | :--- |
-| **Observability Alone** *(Splunk, Datadog, Prometheus)* | Passive metrics/log storage. | Observability tools are **passive sinks**. They store logs but do not know *which* Git PR or CHG maintenance window caused an anomaly, nor can they generate structured Kube CRDs or execute targeted GitOps refresh actions. |
-| **Ansible Alone** *(AAP / AWX)* | Imperative playbook execution. | Ansible is **polling-based and imperative**. Running Ansible playbooks continuously against 100+ clusters wastes CPU and network bandwidth. The Agent is **event-driven and autonomous**, acting immediately when a Git PR lands. |
-| **Autonomous SRE Agent** | Active event correlation & AI RCA. | Combines Git awareness + local runtime state + LLM RCA + CRD reporting in real-time. |
-
----
-
-## 5. Embedded Database Requirement
-
-### Does the Agent Require a Database? **YES (Lightweight Embedded DB)**
-The Agent uses an embedded, zero-dependency key-value store (e.g., **SQLite** or **PebbleDB**):
-
-* **Purpose 1: GitHub API Rate Limit Protection**: GitHub API enforces a 5,000 requests/hour limit. The DB caches PR metadata, commit SHAs, and release tag details locally.
-* **Purpose 2: LangGraph State Persistence**: Persists graph execution state so if the Agent pod restarts mid-reconciliation, it resumes execution without re-fetching Git history or re-running LLM prompts.
-* **Purpose 3: Alert Deduplication**: Stores last reported revision timestamps per app to prevent spamming duplicate reports.
-
----
-
-## 6. GitHub API Integration: Fetching Tags & PRs
-
-### Process Flow for Merges to `main` / `sit`
-```
- [ GitHub Webhook: Push event to main/sit ]
-                    │
-                    ▼
-  [ 1. Fetch Release Tag / Target SHA ]
-  GET /repos/{owner}/{repo}/releases/tags/{tag}
-                    │
-                    ▼
-  [ 2. Compare Commit Delta against Baseline ]
-  GET /repos/{owner}/{repo}/compare/{baseline_sha}...{release_sha}
-                    │
-                    ▼
-  [ 3. List Associated Merged PRs ]
-  GET /repos/{owner}/{repo}/commits/{sha}/pulls
-```
-
-### Data Mapping Example
-From GitHub API responses, the Agent extracts:
-- `PR #142`: "Update payment gateway API client version to v2.4" (Author: `dev-user`, Files: `components/payments/kustomization.yaml`)
-- `PR #145`: "Increase virt MachineConfig memory limits" (Author: `infra-user`, Files: `groups/virt/mcp.yaml`)
-
----
-
-## 7. LangGraph Agent Workflow (Nodes, Edges, & States)
-
-The Agent's internal decision engine is built using **LangGraph** (State Graph Architecture).
+## 1. System Topology Overview
 
 ```
-                      ┌────────────────────────┐
-                      │      START NODE        │
-                      └───────────┬────────────┘
-                                  │
-                                  ▼
-                      ┌────────────────────────┐
-                      │  FetchGitMetadataNode  │
-                      └───────────┬────────────┘
-                                  │
-                                  ▼
-                      ┌────────────────────────┐
-                      │ AssessClusterHealthNode│
-                      └───────────┬────────────┘
-                                  │
-                    ┌─────────────┴─────────────┐
-                    │ Conditional Edge: Health? │
-                    └──────┬─────────────┬──────┘
-             Healthy / InSync    Degraded / OutOfSync
-                   │                     │
-                   │                     ▼
-                   │         ┌─────────────────────────┐
-                   │         │ExtractDiagnosticLogsNode│
-                   │         └───────────┬─────────────┘
-                   │                     │
-                   │                     ▼
-                   │         ┌─────────────────────────┐
-                   │         │LLMDiagnosticAnalyzerNode│
-                   │         └───────────┬─────────────┘
-                   │                     │
-                   └──────────────┬──────┘
-                                  │
-                                  ▼
-                      ┌────────────────────────┐
-                      │EmitClusterAppReportNode│
-                      └───────────┬────────────┘
-                                  │
-                                  ▼
-                      ┌────────────────────────┐
-                      │        END NODE        │
-                      └────────────────────────┘
+                      ┌──────────────────────────────────────────────────────────┐
+                      │              CENTRAL HUB CLUSTER / CONTROL PLANE         │
+                      │                                                          │
+                      │   [ Central SRE Agent ] (LangGraph + LLM + GitHub API)   │
+                      │    - Receives GitHub Webhooks (`main`/`sit` merges)      │
+                      │    - Consumes Kafka CHG Events (`CHG0012345`)           │
+                      │    - Caches PRs & state in SQLite DB                     │
+                      │    - Runs LangGraph AI RCA Engine                        │
+                      └────────────────────────────┬─────────────────────────────┘
+                                                   │
+                ┌──────────────────────────────────┼──────────────────────────────────┐
+                │ (Pushes ChangeWindow CRDs        │ (Relays ClusterAppReports        │
+                │  via RHACM / GitOps)             │  & Diagnostic Logs back)         │
+                ▼                                  ▼                                  ▼
+┌───────────────────────────────┐  ┌───────────────────────────────┐  ┌───────────────────────────────┐
+│ SPOKE CLUSTER 1 (Baremetal)   │  │ SPOKE CLUSTER 2 (Baremetal)   │  │ SPOKE CLUSTER N (Baremetal)   │
+│                               │  │                               │  │                               │
+│ [ drift-operator ] (Go)       │  │ [ drift-operator ] (Go)       │  │ [ drift-operator ] (Go)       │
+│  - Inspects Argo CD Health    │  │  - Inspects Argo CD Health    │  │  - Inspects Argo CD Health    │
+│  - Monitors OpenShift MCP     │  │  - Monitors OpenShift MCP     │  │  - Monitors OpenShift MCP     │
+│  - Tails Pod Logs on Failure  │  │  - Tails Pod Logs on Failure  │  │  - Tails Pod Logs on Failure  │
+└───────────────────────────────┘  └───────────────────────────────┘  └───────────────────────────────┘
 ```
 
-### LangGraph State Schema (`AgentState`)
+---
+
+## 2. Why This Topology (Central Agent + Spoke Operators) Is Ideal
+
+1. **Security & Credential Isolation**: GitHub API tokens, LLM API keys, and S3 storage keys stay **securely on the Central Hub**. Spoke clusters do not need access to GitHub tokens or LLM credentials.
+2. **Native Edge Performance**: The Go `drift-operator` runs natively on each spoke cluster with zero-latency access to the local Kubernetes API, OpenShift MCO API (`machineconfiguration.openshift.io/v1`), and pod log subresources.
+3. **Heavy AI Workload Offloading**: The Python/LangGraph AI engine and SQLite database run centrally, keeping spoke cluster resource footprints minimal (100 MB RAM).
+
+---
+
+## 3. Role of the Central SRE Agent (Hub)
+
+The **Central SRE Agent** is the brain of the system running on the Hub cluster:
+
+* **Inputs**:
+  * **GitHub Webhooks**: Receives `push` events on `main`/`sit` branches when PRs are merged.
+  * **GitHub REST API**: Queries release tags (`v2.4.0`), commit SHAs, PR numbers, titles, authors, and changed file paths (`components/...`).
+  * **Kafka Topic (`gitops.chg.events`)**: Ingests CHG maintenance windows (`CHG0012345`).
+* **Embedded SQLite Database**: Caches GitHub PR metadata to avoid hitting GitHub API rate limits (5,000 req/hr) and checkpoints LangGraph graph states.
+* **LangGraph AI RCA Engine**: When a spoke cluster reports `Degraded` health, the Central Agent pulls the tail pod logs, executes the LangGraph workflow, runs LLM Root Cause Analysis against the merged PR diffs, and synthesizes the final report.
+
+---
+
+## 4. Role of the Local Spoke Operator (`drift-operator`)
+
+The **Local Operator** runs natively on every downstream spoke cluster:
+
+* **Inputs**: Local Kubernetes API (`Argo CD` status) and OpenShift MCO API (`MachineConfigPool`).
+* **Tasks**:
+  1. Reconciles local `ClusterAppReport` objects with `observedRevision`, `syncStatus`, `health`, and `mcpStatus` (`worker`, `virt`).
+  2. Detects local pod failures (`CrashLoopBackOff`, `ImagePullBackOff`).
+  3. Tails 500 lines of pod logs and writes a local `ClusterAppReport` resource.
+  4. Relays status back to the Hub via RHACM (Klusterlet) or direct status sync.
+
+---
+
+## 5. Central LangGraph Workflow (Nodes, Edges, & States)
+
+The **Central Agent** runs the following **LangGraph State Graph**:
+
+```
+                    ┌────────────────────────┐
+                    │  FetchGitMetadataNode  │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │  CollectSpokeStateNode │
+                    └───────────┬────────────┘
+                                │
+                  ┌─────────────┴─────────────┐
+                  │ Conditional Edge: Health? │
+                  └──────┬─────────────┬──────┘
+           Healthy / InSync    Degraded / OutOfSync
+                 │                     │
+                 │                     ▼
+                 │         ┌─────────────────────────┐
+                 │         │ FetchDiagnosticLogsNode │
+                 │         └───────────┬─────────────┘
+                 │                     │
+                 │                     ▼
+                 │         ┌─────────────────────────┐
+                 │         │LLMDiagnosticAnalyzerNode│
+                 │         └───────────┬─────────────┘
+                 │                     │
+                 └──────────────┬──────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ EmitValidationReportNode│
+                    └────────────────────────┘
+```
+
+### Central LangGraph State Schema (`CentralAgentState`)
 
 ```python
-class AgentState(TypedDict):
-    # Git Inputs
+class CentralAgentState(TypedDict):
+    # Git & CHG Metadata
+    chg_number: str             # e.g., "CHG0012345"
     git_repo: str
     target_branch: str          # e.g., "main" or "sit"
     release_tag: str            # e.g., "v2.4.0"
     expected_revision: str      # e.g., "a1b2c3d9"
-    merged_prs: List[dict]      # List of PR numbers, titles, changed files
+    merged_prs: List[dict]      # List of PR titles, authors, changed files
 
-    # Cluster Runtime State
-    cluster_name: str           # e.g., "us-east-01"
-    app_name: str               # e.g., "svc-payments"
-    sync_status: str            # "Synced" | "OutOfSync"
-    health_status: str          # "Healthy" | "Progressing" | "Degraded"
-    mcp_status: dict            # {updatingNodeCount: 0, degradedNodeCount: 0, phase: "Updated"}
+    # Spoke Cluster Statuses (Collected from 100+ Spoke Operators)
+    spoke_reports: List[dict]   # List of ClusterAppReport status objects
+    failing_clusters: List[str] # Clusters reporting Degraded or OutOfSync
 
     # Diagnostic & AI Fields
-    failing_pods: List[str]
-    raw_logs: List[str]         # Tail 500 lines
-    llm_summary: str            # 2-line AI RCA summary
-    log_ref: str                # S3 log URL pointer
+    raw_pod_logs: Dict[str, str] # {cluster_app: "tail log string"}
+    llm_rca_summary: str        # 2-line AI RCA summary
+    log_s3_url: str             # S3 log URL pointer
 
     # Report Output
-    report_created: bool
-    error_message: str
+    report_emitted: bool
 ```
 
-### LangGraph Node Definitions
+### LangGraph Nodes Explained
 
 1. **`FetchGitMetadataNode`**:
-   * **Role**: Triggered by GitHub `push` webhook or GitOps poll. Queries GitHub API (`/compare` and `/commits/{sha}/pulls`), populates `merged_prs` and `expected_revision`.
-2. **`AssessClusterHealthNode`**:
-   * **Role**: Queries local Kubernetes API for Argo CD app health (`syncStatus`, `healthStatus`) and OpenShift `MachineConfigPool` status (`mcp_status`).
-3. **`ExtractDiagnosticLogsNode`**:
-   * **Role**: Executed *only* if `health_status == "Degraded"`. Finds failing pods in `CrashLoopBackOff`, fetches tail 500 lines, uploads full log to S3 (`log_ref`), and truncates inline log snippet.
+   * Triggered by GitHub `push` webhook on `main`/`sit`. Queries GitHub API (`/releases/tags/{tag}` and `/commits/{sha}/pulls`), populates `merged_prs` and caches in SQLite DB.
+2. **`CollectSpokeStateNode`**:
+   * Reads `ClusterAppReport` CRDs sent from all Spoke Operators. Checks `syncStatus`, `health`, and OpenShift `mcpStatus`.
+3. **`FetchDiagnosticLogsNode`**:
+   * Triggered *only* if any spoke cluster reports `Degraded` or `OutOfSync`. Fetches tail pod logs captured by the Spoke Operator.
 4. **`LLMDiagnosticAnalyzerNode`**:
-   * **Role**: Executed *only* if `health_status == "Degraded"`. Passes `raw_logs` + `merged_prs` to LLM prompt:
+   * Triggered *only* if failures exist. Passes pod logs + merged PR file diffs to LLM prompt:
      > *"Analyze these pod logs against merged PR #142 changes. Provide a 2-line root cause statement."*
-5. **`EmitClusterAppReportNode`**:
-   * **Role**: Constructs and writes the `ClusterAppReport` CRD to the central Hub cluster.
+5. **`EmitValidationReportNode`**:
+   * Publishes the final consolidated validation report to Kafka (`gitops.change.validation`).
 
 ---
 
-## 8. Agent Core Pseudocode
+## 6. Central Agent Core Pseudocode
 
 ```python
 import os
@@ -188,21 +154,19 @@ import sqlite3
 import requests
 from langgraph.graph import StateGraph, END
 
-# Initialize Embedded SQLite DB
-db = sqlite3.connect("/var/lib/agent/cache.db")
-db.execute("CREATE TABLE IF NOT EXISTS pr_cache (sha TEXT PRIMARY KEY, pr_json TEXT)")
+# Initialize Central SQLite Cache
+db = sqlite3.connect("/var/lib/central-agent/cache.db")
+db.execute("CREATE TABLE IF NOT EXISTS pr_cache (tag TEXT PRIMARY KEY, pr_json TEXT)")
 
-def fetch_git_metadata_node(state: AgentState) -> AgentState:
+def fetch_git_metadata_node(state: CentralAgentState) -> CentralAgentState:
     tag = state["release_tag"]
-    # 1. Check local DB cache
     cursor = db.cursor()
-    cursor.execute("SELECT pr_json FROM pr_cache WHERE sha=?", (tag,))
+    cursor.execute("SELECT pr_json FROM pr_cache WHERE tag=?", (tag,))
     row = cursor.fetchone()
     
     if row:
         state["merged_prs"] = json.loads(row[0])
     else:
-        # 2. Call GitHub API
         headers = {"Authorization": f"token {os.getenv('GITHUB_TOKEN')}"}
         res = requests.get(f"https://api.github.com/repos/my-org/gitops-repo/commits/{tag}/pulls", headers=headers)
         prs = res.json()
@@ -211,83 +175,77 @@ def fetch_git_metadata_node(state: AgentState) -> AgentState:
         db.commit()
     return state
 
-def assess_cluster_health_node(state: AgentState) -> AgentState:
-    # Query local Kube API for Argo CD App & OpenShift MCP
-    app_info = k8s_client.get_argo_app(state["app_name"])
-    mcp_info = k8s_client.get_mcp_status("virt")
+def collect_spoke_state_node(state: CentralAgentState) -> CentralAgentState:
+    # Read ClusterAppReports from all spoke operators via Hub Kube API
+    reports = hub_k8s_client.list_cluster_app_reports()
+    state["spoke_reports"] = reports
     
-    state["sync_status"] = app_info.status.sync.status          # Synced | OutOfSync
-    state["health_status"] = app_info.status.health.status      # Healthy | Degraded
-    state["mcp_status"] = mcp_info                              # {updating: 0, degraded: 0}
+    failing = []
+    for r in reports:
+        if r["spec"]["health"] == "Degraded" or r["spec"]["syncStatus"] == "OutOfSync":
+            failing.append(r["spec"]["clusterName"])
+    state["failing_clusters"] = failing
     return state
 
-def route_health_check(state: AgentState) -> str:
-    if state["health_status"] == "Degraded" or state["sync_status"] == "OutOfSync":
+def route_health_check(state: CentralAgentState) -> str:
+    if len(state["failing_clusters"]) > 0:
         return "diagnose"
     return "emit_report"
 
-def extract_diagnostic_logs_node(state: AgentState) -> AgentState:
-    pod = k8s_client.get_failing_pod(state["app_name"])
-    raw_logs = k8s_client.get_pod_logs(pod.name, tail_lines=500)
-    
-    # Upload full log to S3 evidence bucket
-    s3_url = s3_client.upload(f"logs/{state['app_name']}.log", raw_logs)
-    state["log_ref"] = s3_url
-    state["raw_logs"] = raw_logs[:20] # Keep max 20 inline lines
+def fetch_diagnostic_logs_node(state: CentralAgentState) -> CentralAgentState:
+    # Extract logs captured by spoke operators
+    logs = {}
+    for r in state["spoke_reports"]:
+        if r["spec"]["clusterName"] in state["failing_clusters"]:
+            logs[r["spec"]["clusterName"]] = r["spec"].get("tailLogs", [])
+    state["raw_pod_logs"] = logs
     return state
 
-def llm_diagnostic_analyzer_node(state: AgentState) -> AgentState:
+def llm_diagnostic_analyzer_node(state: CentralAgentState) -> CentralAgentState:
     prompt = f"""
-    You are an expert SRE. Analyze the error logs below against PR changes:
+    You are an expert SRE. Analyze the error logs from failing spoke clusters against merged PR changes:
     PR Changes: {json.dumps(state['merged_prs'])}
-    Pod Error Logs: {state['raw_logs']}
+    Spoke Pod Logs: {json.dumps(state['raw_pod_logs'])}
     Provide a concise 2-sentence Root Cause Analysis (RCA).
     """
     summary = llm_client.generate(prompt)
-    state["llm_summary"] = summary
+    state["llm_rca_summary"] = summary
     return state
 
-def emit_cluster_app_report_node(state: AgentState) -> AgentState:
-    report_crd = {
-        "apiVersion": "gitops.example.com/v1alpha1",
-        "kind": "ClusterAppReport",
-        "metadata": {"name": f"{state['cluster_name']}-{state['app_name']}", "namespace": "gitops-fleet"},
-        "spec": {
-            "clusterName": state["cluster_name"],
-            "appName": state["app_name"],
-            "observedRevision": state["expected_revision"],
-            "syncStatus": state["sync_status"],
-            "health": state["health_status"],
-            "mcpStatus": state["mcp_status"],
-            "observedAt": now_iso()
-        }
+def emit_validation_report_node(state: CentralAgentState) -> CentralAgentState:
+    report_payload = {
+        "chgNumber": state["chg_number"],
+        "releaseTag": state["release_tag"],
+        "failingClusters": state["failing_clusters"],
+        "rcaSummary": state.get("llm_rca_summary", "All checks passed"),
+        "status": "Validated" if len(state["failing_clusters"]) == 0 else "ValidationFailed"
     }
-    hub_k8s_client.apply(report_crd)
-    state["report_created"] = True
+    kafka_producer.send("gitops.change.validation", json.dumps(report_payload))
+    state["report_emitted"] = True
     return state
 
-# Construct LangGraph State Graph
-workflow = StateGraph(AgentState)
+# Construct Central LangGraph State Graph
+workflow = StateGraph(CentralAgentState)
 workflow.add_node("fetch_git_metadata", fetch_git_metadata_node)
-workflow.add_node("assess_cluster_health", assess_cluster_health_node)
-workflow.add_node("extract_logs", extract_diagnostic_logs_node)
+workflow.add_node("collect_spoke_state", collect_spoke_state_node)
+workflow.add_node("fetch_logs", fetch_diagnostic_logs_node)
 workflow.add_node("llm_analyzer", llm_diagnostic_analyzer_node)
-workflow.add_node("emit_report", emit_cluster_app_report_node)
+workflow.add_node("emit_report", emit_validation_report_node)
 
 # Add Edges
 workflow.set_entry_point("fetch_git_metadata")
-workflow.add_edge("fetch_git_metadata", "assess_cluster_health")
+workflow.add_edge("fetch_git_metadata", "collect_spoke_state")
 workflow.add_conditional_edges(
-    "assess_cluster_health",
+    "collect_spoke_state",
     route_health_check,
     {
-        "diagnose": "extract_logs",
+        "diagnose": "fetch_logs",
         "emit_report": "emit_report"
     }
 )
-workflow.add_edge("extract_logs", "llm_analyzer")
+workflow.add_edge("fetch_logs", "llm_analyzer")
 workflow.add_edge("llm_analyzer", "emit_report")
 workflow.add_edge("emit_report", END)
 
-agent_app = workflow.compile()
+central_agent_app = workflow.compile()
 ```
