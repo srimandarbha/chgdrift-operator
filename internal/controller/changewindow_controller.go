@@ -235,7 +235,15 @@ func (r *ChangeWindowReconciler) runParkedHardRefreshAction(chg *gitopsv1alpha1.
 		tailLogs = tailLogs[len(tailLogs)-20:]
 	}
 
-	logRef := fmt.Sprintf("https://nexus.company.com:8081/repository/gitops-evidence/%s/%s-%s-attempt-%d.log", chg.Spec.CHGNumber, cs.ClusterName, appName, action.Attempts+1)
+	nexusBaseURL := chg.Spec.EvidenceRepoURL
+	if nexusBaseURL == "" {
+		nexusBaseURL = os.Getenv("NEXUS_RAW_REPO_URL")
+	}
+	if nexusBaseURL == "" {
+		nexusBaseURL = "https://nexus.company.com:8081/repository/gitops-evidence"
+	}
+
+	logRef := fmt.Sprintf("%s/%s/%s-%s-attempt-%d.log", strings.TrimSuffix(nexusBaseURL, "/"), chg.Spec.CHGNumber, cs.ClusterName, appName, action.Attempts+1)
 
 	action.Attempts++
 	action.LastAttemptAt = metav1.NewTime(now)

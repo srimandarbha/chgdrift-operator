@@ -58,6 +58,9 @@ spec:
           requests:
             cpu: 100m
             memory: 128Mi
+        env:
+        - name: NEXUS_RAW_REPO_URL
+          value: "https://nexus.company.com:8081/repository/gitops-evidence"
         envFrom:
         - secretRef:
             name: drift-operator-kafka-certs

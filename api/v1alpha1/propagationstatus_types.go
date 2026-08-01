@@ -147,6 +147,7 @@ type ChangeWindowSpec struct {
 	StartTime                   metav1.Time       `json:"startTime"`
 	EndTime                     metav1.Time       `json:"endTime"`
 	StaleReportThresholdSeconds int32             `json:"staleReportThresholdSeconds,omitempty"`
+	EvidenceRepoURL             string            `json:"evidenceRepoURL,omitempty"` // e.g., https://nexus.company.com:8081/repository/gitops-evidence
 	HardRefresh                 HardRefreshConfig `json:"hardRefresh,omitempty"`
 }
 
