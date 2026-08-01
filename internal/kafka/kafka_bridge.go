@@ -177,7 +177,11 @@ func (kb *KafkaBridge) Start(ctx context.Context) error {
 					return nil
 				}
 				logger.Error(err, "failed to fetch Kafka message; retrying in 2s")
-				time.Sleep(2 * time.Second)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(2 * time.Second):
+				}
 				continue
 			}
 
@@ -217,17 +221,26 @@ func (kb *KafkaBridge) Start(ctx context.Context) error {
 				},
 			}
 
-			if err := kb.Client.Create(ctx, chg); err != nil {
-				if apierrors.IsAlreadyExists(err) {
-					logger.V(1).Info("ChangeWindow already exists; duplicate Kafka delivery",
-						"chg", payload.CHGDetails.CHGNumber)
+			created := false
+			for !created {
+				if err := kb.Client.Create(ctx, chg); err != nil {
+					if apierrors.IsAlreadyExists(err) {
+						logger.V(1).Info("ChangeWindow already exists; duplicate Kafka delivery",
+							"chg", payload.CHGDetails.CHGNumber)
+						created = true
+					} else {
+						logger.Error(err, "failed to create ChangeWindow from Kafka message; retrying in 2s",
+							"chg", payload.CHGDetails.CHGNumber)
+						select {
+						case <-ctx.Done():
+							return nil
+						case <-time.After(2 * time.Second):
+						}
+					}
 				} else {
-					logger.Error(err, "failed to create ChangeWindow from Kafka message; will retry",
-						"chg", payload.CHGDetails.CHGNumber)
-					continue
+					logger.Info("ChangeWindow created from Kafka event", "chg", payload.CHGDetails.CHGNumber)
+					created = true
 				}
-			} else {
-				logger.Info("ChangeWindow created from Kafka event", "chg", payload.CHGDetails.CHGNumber)
 			}
 
 			if cerr := kb.Reader.CommitMessages(ctx, msg); cerr != nil {

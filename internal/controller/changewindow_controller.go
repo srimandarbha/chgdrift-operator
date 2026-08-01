@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -74,7 +76,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// 2. Fetch Latest PropagationStatus for every impacted Application
 	for _, appName := range chg.Spec.ImpactedApps {
 		var psList gitopsv1alpha1.PropagationStatusList
-		if err := r.List(ctx, &psList, client.InNamespace(chg.Namespace), client.MatchingFields{"spec.appName": appName}); err == nil && len(psList.Items) > 0 {
+		if err := r.List(ctx, &psList, client.InNamespace(chg.Namespace), client.MatchingFields{"spec.appName": appName}, client.Limit(100)); err == nil && len(psList.Items) > 0 {
 			ps := psList.Items[0]
 			chg.Status.AppStates[appName] = gitopsv1alpha1.AppClusterStateMap{
 				Phase:         ps.Status.Phase,
@@ -207,13 +209,15 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Rule 4: Patch status independently using MergeFrom
-	if err := r.Status().Patch(ctx, &chg, client.MergeFrom(original)); err != nil {
-		if apierrors.IsConflict(err) {
-			// Rule 2: Conflict retry
-			return ctrl.Result{Requeue: true}, nil
+	// Rule 4: Patch status independently using MergeFrom if status changed
+	if !reflect.DeepEqual(original.Status, chg.Status) {
+		if err := r.Status().Patch(ctx, &chg, client.MergeFrom(original)); err != nil {
+			if apierrors.IsConflict(err) {
+				// Rule 2: Conflict retry
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	if chg.Status.Phase == "InProgress" {
@@ -229,7 +233,8 @@ func (r *ChangeWindowReconciler) classifySilence(appName string, cs gitopsv1alph
 		return gitopsv1alpha1.SilentClusterState{State: "Reporting"}
 	}
 
-	if !cs.SawReportSinceChgStart {
+	sawReportSinceChgStart := cs.SawReportSinceChgStart || cs.ObservedAt.After(chg.Spec.StartTime.Time) || cs.ObservedAt.Time.Equal(chg.Spec.StartTime.Time)
+	if !sawReportSinceChgStart {
 		return gitopsv1alpha1.SilentClusterState{
 			App:              appName,
 			Cluster:          cs.ClusterName,
@@ -418,7 +423,7 @@ func (r *ChangeWindowReconciler) mapPropagationStatusToChangeWindow(ctx context.
 		return nil
 	}
 	var chgList gitopsv1alpha1.ChangeWindowList
-	if err := r.List(ctx, &chgList, client.InNamespace(ps.Namespace), client.MatchingFields{"spec.impactedApps": ps.Spec.AppName}); err != nil {
+	if err := r.List(ctx, &chgList, client.InNamespace(ps.Namespace), client.MatchingFields{"spec.impactedApps": ps.Spec.AppName}, client.Limit(100)); err != nil {
 		return nil
 	}
 	var reqs []ctrl.Request
@@ -446,6 +451,7 @@ func (r *ChangeWindowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gitopsv1alpha1.ChangeWindow{}).
+		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 5}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
 			&gitopsv1alpha1.PropagationStatus{},

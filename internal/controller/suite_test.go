@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -284,5 +285,62 @@ func TestChangeWindowReconcile(t *testing.T) {
 	}
 	if updatedCHG.Status.Phase != "Validated" {
 		t.Errorf("expected phase Validated, got %s", updatedCHG.Status.Phase)
+	}
+}
+
+func TestLocalAppWatchReconciler(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "svc-payments-descriptor",
+			Namespace: "payments-prod",
+			Labels: map[string]string{
+				AppLabelKey: "svc-payments",
+			},
+		},
+		Data: map[string]string{
+			"syncStatus":       "Synced",
+			"health":           "Healthy",
+			"observedRevision": "rev-100",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cm).
+		Build()
+
+	r := &LocalAppWatchReconciler{
+		Client:      fakeClient,
+		ClusterName: "spoke-01",
+	}
+
+	req := ctrlRequest("payments-prod", "svc-payments-descriptor")
+	ctx := context.Background()
+
+	res, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("expected requeueAfter 30s, got %v", res.RequeueAfter)
+	}
+
+	var report gitopsv1alpha1.ClusterAppReport
+	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: reportNamespace, Name: "spoke-01-svc-payments"}, &report); err != nil {
+		t.Fatalf("failed to fetch created report: %v", err)
+	}
+
+	if report.Spec.AppName != "svc-payments" || report.Spec.ClusterName != "spoke-01" {
+		t.Errorf("unexpected report spec: %+v", report.Spec)
+	}
+
+	// Reconcile again to test patch logic
+	res, err = r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error on update: %v", err)
 	}
 }

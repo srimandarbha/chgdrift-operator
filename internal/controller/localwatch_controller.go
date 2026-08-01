@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
@@ -133,7 +134,14 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// MCP status is always cheap (a single unstructured Get).
 	spec.MCPStatus = r.readMachineConfigPool(ctx)
 
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, r.upsertReport(ctx, reportName, spec)
+	if err := r.upsertReport(ctx, reportName, spec); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 // -------------------------------------------------------------------------
@@ -142,7 +150,7 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 func (r *LocalAppWatchReconciler) collectWarningEvents(ctx context.Context, namespace string) []gitopsv1alpha1.EventSummary {
 	var eventList corev1.EventList
-	if err := r.List(ctx, &eventList, client.InNamespace(namespace)); err != nil {
+	if err := r.List(ctx, &eventList, client.InNamespace(namespace), client.Limit(100)); err != nil {
 		return nil
 	}
 
@@ -203,6 +211,7 @@ func (r *LocalAppWatchReconciler) collectPodLogs(ctx context.Context, namespace,
 	if err := r.List(ctx, &podList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{"app": appName},
+		client.Limit(100),
 	); err != nil {
 		return nil
 	}
@@ -352,7 +361,7 @@ func (r *LocalAppWatchReconciler) checkVMHealth(ctx context.Context, namespace, 
 		Kind:    "VirtualMachineList",
 	})
 	if err := r.List(ctx, vmList, client.InNamespace(namespace),
-		client.MatchingLabels{"app": appName}); err != nil {
+		client.MatchingLabels{"app": appName}, client.Limit(100)); err != nil {
 		return nil
 	}
 
@@ -398,7 +407,7 @@ func (r *LocalAppWatchReconciler) isVMSnapshotReady(ctx context.Context, namespa
 		Version: "v1alpha1",
 		Kind:    "VirtualMachineSnapshotList",
 	})
-	if err := r.List(ctx, snapList, client.InNamespace(namespace)); err != nil {
+	if err := r.List(ctx, snapList, client.InNamespace(namespace), client.Limit(100)); err != nil {
 		return true // Optional check; assume true if CRD is not present
 	}
 	for _, snap := range snapList.Items {
@@ -459,7 +468,7 @@ func (r *LocalAppWatchReconciler) findActiveMigration(ctx context.Context, names
 		Version: "v1",
 		Kind:    "VirtualMachineInstanceMigrationList",
 	})
-	if err := r.List(ctx, migList, client.InNamespace(namespace)); err != nil {
+	if err := r.List(ctx, migList, client.InNamespace(namespace), client.Limit(100)); err != nil {
 		return ""
 	}
 	for _, mig := range migList.Items {
@@ -544,7 +553,7 @@ func (r *LocalAppWatchReconciler) upsertReport(ctx context.Context, name string,
 	// Use DeepCopy to avoid mutating the cached object.
 	updated := existing.DeepCopy()
 	updated.Spec = spec
-	return r.Update(ctx, updated)
+	return r.Patch(ctx, updated, client.MergeFrom(existing))
 }
 
 // -------------------------------------------------------------------------
@@ -571,5 +580,6 @@ func (r *LocalAppWatchReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// Watch ConfigMaps labelled as app descriptors.
 		For(&corev1.ConfigMap{}).
+		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 5}).
 		Complete(r)
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -77,6 +79,7 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if err := r.List(ctx, &reports,
 		client.InNamespace(ps.Namespace),
 		client.MatchingFields{"spec.appName": ps.Spec.AppName},
+		client.Limit(100),
 	); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -168,13 +171,15 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	setCondition(&ps.Status.Conditions, ps.Status.Phase)
 	emitTransitionEvent(r.Recorder, &ps, previousPhase, diverged, lagging, stale, missing)
 
-	// Rule 4: Patch status independently of spec using MergeFrom
-	if err := r.Status().Patch(ctx, &ps, client.MergeFrom(original)); err != nil {
-		if apierrors.IsConflict(err) {
-			// Rule 2: Conflict error - retry immediately
-			return ctrl.Result{Requeue: true}, nil
+	// Rule 4: Patch status independently of spec using MergeFrom if status changed
+	if !reflect.DeepEqual(original.Status, ps.Status) {
+		if err := r.Status().Patch(ctx, &ps, client.MergeFrom(original)); err != nil {
+			if apierrors.IsConflict(err) {
+				// Rule 2: Conflict error - retry immediately
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	if len(diverged) > 0 || len(lagging) > 0 {
@@ -284,6 +289,7 @@ func (r *PropagationStatusReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gitopsv1alpha1.PropagationStatus{}).
+		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 5}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
 			&gitopsv1alpha1.ClusterAppReport{},
