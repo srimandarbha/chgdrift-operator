@@ -1,6 +1,6 @@
 # Extensibility & Developer Guide
 
-This guide explains how to add new APIs, CRDs, and Controllers to `drift-operator` while maintaining strict compliance with [.agents/AGENTS.md](file:///c:/Users/SRIMANDARBHA/Projects/drift-operator/.agents/AGENTS.md).
+This guide explains how to add new APIs, CRDs, and Controllers to `drift-operator` while maintaining strict compliance with [AGENTS.md](../.agents/AGENTS.md).
 
 ---
 

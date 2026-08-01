@@ -35,12 +35,17 @@ drift-operator/
 │   │   └── kafka_bridge.go        # mTLS & TLS CN Certificate Verification
 │   └── metrics/                   # Prometheus Metrics (State, Lag, Report Age)
 │       └── metrics.go
+├── docs/                          # Architecture & Integration Guides
+│   ├── DEVELOPMENT.md             # Extensibility & Developer Guide
+│   ├── DISCONNECTED_DEPLOYMENT.md # Air-gapped Baremetal OpenShift Guide
+│   ├── KAFKA_INTEGRATION.md       # Kafka Topics & Security Integration Guide
+│   ├── LOCAL_TESTING.md           # Local Kubernetes & Dev Testing Guide
+│   ├── SRE_AGENT_ARCHITECTURE.md  # Central Agent Topology & LangGraph Workflow
+│   └── TEAMS_INTEGRATION.md       # MS Teams Adaptive Cards & Webhook Guide
 ├── Dockerfile                     # Multi-stage OpenShift-compliant Container Build
 ├── main.go                        # Manager entrypoint (Leader Election, Probes, Indexers)
 ├── Makefile                       # Build/test automation
-├── PROJECT                        # Kubebuilder metadata
-├── DEVELOPMENT.md                 # Extensibility & Developer Guide
-└── KAFKA_INTEGRATION.md           # Kafka Topics & Security Integration Guide
+└── PROJECT                        # Kubebuilder metadata
 ```
 
 ## Features
@@ -68,12 +73,12 @@ drift-operator/
 
 ## Documentation & Integration Guides
 
-- **[TEAMS_INTEGRATION.md](TEAMS_INTEGRATION.md)** — MS Teams Incoming Webhook setup, Adaptive Cards v1.4 schema, and Nexus Raw log evidence buttons.
-- **[SRE_AGENT_ARCHITECTURE.md](SRE_AGENT_ARCHITECTURE.md)** — Autonomous Central SRE Agent design, GitHub PR/Tag API integration, embedded DB caching, & LangGraph state graph.
-- **[LOCAL_TESTING.md](LOCAL_TESTING.md)** — Step-by-step local testing guide using Docker Desktop Kubernetes & `make run`.
-- **[DISCONNECTED_DEPLOYMENT.md](DISCONNECTED_DEPLOYMENT.md)** — Step-by-step air-gapped baremetal OpenShift deployment, internal Nexus image mirroring, Nexus Raw log evidence, & restricted-v2 SCC guide.
-- **[KAFKA_INTEGRATION.md](KAFKA_INTEGRATION.md)** — Ingestion & emission Kafka topics, TLS/mTLS certificate (CN validation) setup, and JSON event schemas.
-- **[DEVELOPMENT.md](DEVELOPMENT.md)** — Step-by-step 4-stage guide for adding new APIs, CRDs, and controllers.
+- **[TEAMS_INTEGRATION.md](docs/TEAMS_INTEGRATION.md)** — MS Teams Incoming Webhook setup, Adaptive Cards v1.4 schema, and Nexus Raw log evidence buttons.
+- **[SRE_AGENT_ARCHITECTURE.md](docs/SRE_AGENT_ARCHITECTURE.md)** — Autonomous Central SRE Agent design, GitHub PR/Tag API integration, embedded DB caching, & LangGraph state graph.
+- **[LOCAL_TESTING.md](docs/LOCAL_TESTING.md)** — Step-by-step local testing guide using Docker Desktop Kubernetes & `make run`.
+- **[DISCONNECTED_DEPLOYMENT.md](docs/DISCONNECTED_DEPLOYMENT.md)** — Step-by-step air-gapped baremetal OpenShift deployment, internal Nexus image mirroring, Nexus Raw log evidence, & restricted-v2 SCC guide.
+- **[KAFKA_INTEGRATION.md](docs/KAFKA_INTEGRATION.md)** — Ingestion & emission Kafka topics, TLS/mTLS certificate (CN validation) setup, and JSON event schemas.
+- **[DEVELOPMENT.md](docs/DEVELOPMENT.md)** — Step-by-step 4-stage guide for adding new APIs, CRDs, and controllers.
 - **[.agents/AGENTS.md](.agents/AGENTS.md)** — Production Operator Development Guidelines.
 
 ## Building & Running
