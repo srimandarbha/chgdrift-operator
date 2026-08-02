@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -153,11 +152,15 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 
 	case now.After(chg.Spec.EndTime.Time):
+		// Reset stabilization clock on regression/failure
+		chg.Status.StabilizationStartedAt = nil
 		chg.Status.Phase = "ValidationFailed"
 		chg.Status.OverallStatus = "Degraded"
 		requeueAfter = 60 * time.Second
 
 	default:
+		// Reset stabilization clock on regression
+		chg.Status.StabilizationStartedAt = nil
 		chg.Status.Phase = "InProgress"
 		chg.Status.OverallStatus = "InProgress"
 		requeueAfter = 15 * time.Second
@@ -262,6 +265,9 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 	}
 
 	totalClusterStates := 0
+	observedAnyMCP := false
+	observedAnyVirt := false
+
 	for appName, appStateMap := range chg.Status.AppStates {
 		if len(appStateMap.ClusterStates) == 0 {
 			gateAllChanges.Status = gitopsv1alpha1.GateStatusUnknown
@@ -297,16 +303,17 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 
 			mcp := cs.MCPStatus
 			if mcp.Name != "" || mcp.Phase != "" {
+				observedAnyMCP = true
 				if mcp.Phase == "Degraded" || mcp.DegradedNodeCount > 0 {
 					gateMCP.Status = gitopsv1alpha1.GateStatusFalse
 					gateMCP.Reason = "MCPDegraded"
 					gateMCP.Message = fmt.Sprintf("MachineConfigPool %s has %d degraded nodes", mcp.Name, mcp.DegradedNodeCount)
 					issues = append(issues, fmt.Sprintf("%s/%s: MCP %s degraded", appName, cs.ClusterName, mcp.Name))
-				} else if mcp.Phase == "Updating" || mcp.UpdatingNodeCount > 0 {
+				} else if mcp.Phase == "Updating" || mcp.UpdatingNodeCount > 0 || mcp.UnavailableNodeCount > 0 {
 					gateMCP.Status = gitopsv1alpha1.GateStatusFalse
-					gateMCP.Reason = "MCPUpdating"
-					gateMCP.Message = fmt.Sprintf("MachineConfigPool %s still updating %d nodes", mcp.Name, mcp.UpdatingNodeCount)
-					issues = append(issues, fmt.Sprintf("%s/%s: MCP %s updating", appName, cs.ClusterName, mcp.Name))
+					gateMCP.Reason = "MCPUpdatingOrUnavailable"
+					gateMCP.Message = fmt.Sprintf("MachineConfigPool %s updating=%d, unavailable=%d", mcp.Name, mcp.UpdatingNodeCount, mcp.UnavailableNodeCount)
+					issues = append(issues, fmt.Sprintf("%s/%s: MCP %s updating/unavailable", appName, cs.ClusterName, mcp.Name))
 				} else if mcp.MachineCount > 0 && mcp.ReadyMachineCount < mcp.MachineCount {
 					gateMCP.Status = gitopsv1alpha1.GateStatusFalse
 					gateMCP.Reason = "MCPNodesNotReady"
@@ -331,10 +338,11 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 			}
 
 			for _, oc := range cs.ObjectChanges {
-				if oc.ChangeType == "Failed" {
+				ct := strings.ToLower(oc.ChangeType)
+				if ct == "failed" || ct == "syncfailed" || ct == "error" || ct == "syncerror" || strings.HasPrefix(ct, "fail") {
 					gateObjects.Status = gitopsv1alpha1.GateStatusFalse
 					gateObjects.Reason = "ObjectSyncFailed"
-					gateObjects.Message = fmt.Sprintf("Resource %s/%s failed sync", oc.Kind, oc.Name)
+					gateObjects.Message = fmt.Sprintf("Resource %s/%s failed sync (%s)", oc.Kind, oc.Name, oc.ChangeType)
 					issues = append(issues, fmt.Sprintf("%s/%s: object %s/%s failed sync", appName, cs.ClusterName, oc.Kind, oc.Name))
 				}
 			}
@@ -349,11 +357,20 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 			}
 
 			virt := cs.VirtStatus
+			if virt.HyperConvergedHealth != "" && virt.HyperConvergedHealth != "Unknown" {
+				observedAnyVirt = true
+			}
 			if virt.HyperConvergedHealth == "Degraded" {
 				gateVirt.Status = gitopsv1alpha1.GateStatusFalse
 				gateVirt.Reason = "HyperConvergedDegraded"
 				gateVirt.Message = "OpenShift Virtualization HyperConverged deployment is degraded"
 				issues = append(issues, fmt.Sprintf("%s/%s: HyperConverged degraded", appName, cs.ClusterName))
+			}
+			if !virt.VirtHandlerReady {
+				gateVirt.Status = gitopsv1alpha1.GateStatusFalse
+				gateVirt.Reason = "VirtHandlerNotReady"
+				gateVirt.Message = "virt-handler DaemonSet is not ready"
+				issues = append(issues, fmt.Sprintf("%s/%s: virt-handler unready", appName, cs.ClusterName))
 			}
 			if virt.StalledMigrations > 0 {
 				gateVirt.Status = gitopsv1alpha1.GateStatusFalse
@@ -370,11 +387,28 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 		}
 	}
 
+	if !observedAnyMCP {
+		gateMCP.Status = gitopsv1alpha1.GateStatusUnknown
+		gateMCP.Reason = "MCPStatusNotReported"
+		gateMCP.Message = "MachineConfigPool telemetry was not observed for any cluster"
+	}
+
+	if !observedAnyVirt {
+		gateVirt.Status = gitopsv1alpha1.GateStatusUnknown
+		gateVirt.Reason = "VirtStatusNotReported"
+		gateVirt.Message = "Virtualization telemetry was not observed or HyperConverged status is unknown"
+	}
+
 	if totalClusterStates == 0 {
 		gateAllChanges.Status = gitopsv1alpha1.GateStatusUnknown
 		gateAllChanges.Reason = "NoClusterStatesObserved"
 		gateAllChanges.Message = "No per-cluster state reports were observed"
 		gateHealth.Status = gitopsv1alpha1.GateStatusUnknown
+		gateMCP.Status = gitopsv1alpha1.GateStatusUnknown
+		gateEvents.Status = gitopsv1alpha1.GateStatusUnknown
+		gateObjects.Status = gitopsv1alpha1.GateStatusUnknown
+		gateDeps.Status = gitopsv1alpha1.GateStatusUnknown
+		gateVirt.Status = gitopsv1alpha1.GateStatusUnknown
 		issues = append(issues, "No cluster reports available to validate change")
 	}
 
@@ -477,16 +511,6 @@ func (r *ChangeWindowReconciler) runParkedHardRefreshAction(chg *gitopsv1alpha1.
 		return
 	}
 
-	nexusBaseURL := chg.Spec.EvidenceRepoURL
-	if nexusBaseURL == "" {
-		nexusBaseURL = os.Getenv("NEXUS_RAW_REPO_URL")
-	}
-
-	logRef := ""
-	if nexusBaseURL != "" {
-		logRef = fmt.Sprintf("%s/%s/%s-%s-attempt-%d.log", strings.TrimSuffix(nexusBaseURL, "/"), chg.Spec.CHGNumber, cs.ClusterName, appName, action.Attempts+1)
-	}
-
 	action.Attempts++
 	action.LastAttemptAt = metav1.NewTime(now)
 	action.NextEligibleAt = metav1.NewTime(now.Add(waitInterval))
@@ -497,7 +521,7 @@ func (r *ChangeWindowReconciler) runParkedHardRefreshAction(chg *gitopsv1alpha1.
 		Type:          "HardRefresh",
 		TriggeredAt:   metav1.NewTime(now),
 		TriggerResult: "Parked (Execution disabled in operator config)",
-		LogRef:        logRef,
+		LogRef:        "", // Empty when Parked; no fake evidence URL generated
 		LogSummary:    fmt.Sprintf("Parked hard refresh action evaluated for %s on cluster %s", appName, cs.ClusterName),
 		TailLogs:      nil,
 	})

@@ -59,6 +59,7 @@ spec:
                     machineCount: { type: integer }
                     updatedNodeCount: { type: integer }
                     updatingNodeCount: { type: integer }
+                    unavailableNodeCount: { type: integer }
                     degradedNodeCount: { type: integer }
                     phase: { type: string }
                 # Spoke-collected observability data — only populated when

@@ -51,6 +51,15 @@ rules:
   - apiGroups: ["hco.kubevirt.io"]
     resources: ["hyperconvergeds"]
     verbs: ["get", "list", "watch"]
+
+  # KubeVirt workload, migration, and daemonset telemetry checks.
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines", "virtualmachineinstances", "virtualmachineinstancemigrations", "kubevirts"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -115,7 +115,7 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// MCP and Virt status are collected on each reconcile.
 	mcpPool := cm.Labels["gitops.example.com/mcp-pool"]
 	spec.MCPStatus = r.readMachineConfigPool(ctx, mcpPool)
-	spec.VirtStatus = r.readVirtualizationStatus(ctx)
+	spec.VirtStatus = r.readVirtualizationStatus(ctx, desc.Namespace)
 
 	if err := r.upsertReport(ctx, reportName, spec); err != nil {
 		if apierrors.IsConflict(err) {
@@ -274,7 +274,6 @@ func (r *LocalAppWatchReconciler) objectChangesFromAnnotation(cm *corev1.ConfigM
 				}
 			}
 		} else if strings.Contains(line, "=") && strings.Contains(line, "/") {
-			// Format: "Kind/Name=ChangeType:field1,field2"
 			eqParts := strings.SplitN(line, "=", 2)
 			knParts := strings.SplitN(eqParts[0], "/", 2)
 			if len(knParts) == 2 {
@@ -334,7 +333,6 @@ func (r *LocalAppWatchReconciler) checkDependencies(ctx context.Context, namespa
 		case "DataVolume":
 			dep.Ready = r.isDataVolumeReady(ctx, namespace, name)
 		default:
-			// Fail-closed on unknown dependency kinds
 			dep.Ready = false
 			dep.Note = fmt.Sprintf("readiness check not implemented for kind %s", kind)
 		}
@@ -399,13 +397,19 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, pre
 	machineCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "machineCount")
 	readyCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "readyMachineCount")
 	updatedCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "updatedMachineCount")
-	updatingCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "unavailableMachineCount")
+	unavailableCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "unavailableMachineCount")
 	degradedCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "degradedMachineCount")
 	currentConfig, _, _ := unstructured.NestedString(mcp.Object, "status", "configuration", "name")
 	desiredConfig, _, _ := unstructured.NestedString(mcp.Object, "spec", "configuration", "name")
 
+	// In MCO status, updating nodes are nodes that have not finished updating to desired config
+	updatingCount := machineCount - updatedCount
+	if updatingCount < 0 {
+		updatingCount = 0
+	}
+
 	phase := "Updated"
-	if updatingCount > 0 || readyCount < machineCount {
+	if updatingCount > 0 || readyCount < machineCount || unavailableCount > 0 {
 		phase = "Updating"
 	}
 	if degradedCount > 0 {
@@ -418,6 +422,7 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, pre
 		ReadyMachineCount:     int32(readyCount),
 		UpdatedNodeCount:      int32(updatedCount),
 		UpdatingNodeCount:     int32(updatingCount),
+		UnavailableNodeCount:  int32(unavailableCount),
 		DegradedNodeCount:     int32(degradedCount),
 		CurrentRenderedConfig: currentConfig,
 		DesiredRenderedConfig: desiredConfig,
@@ -425,30 +430,121 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, pre
 	}
 }
 
-func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context) gitopsv1alpha1.VirtualizationImpactStatus {
+func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, appNamespace string) gitopsv1alpha1.VirtualizationImpactStatus {
 	status := gitopsv1alpha1.VirtualizationImpactStatus{
 		HyperConvergedHealth: "Healthy",
 		VirtHandlerReady:     true,
 	}
 
+	// 1. Check HyperConverged status in openshift-cnv or fallback namespace
 	hco := &unstructured.Unstructured{}
 	hco.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "hco.kubevirt.io",
 		Version: "v1beta1",
 		Kind:    "HyperConverged",
 	})
-	if err := r.Get(ctx, types.NamespacedName{Namespace: "openshift-cnv", Name: "kubevirt-hyperconverged"}, hco); err == nil {
-		conditions, found, _ := unstructured.NestedSlice(hco.Object, "status", "conditions")
-		if found {
-			for _, condRaw := range conditions {
-				cond, ok := condRaw.(map[string]interface{})
-				if !ok {
-					continue
+	foundHCO := false
+	for _, ns := range []string{"openshift-cnv", "kubevirt-hyperconverged"} {
+		if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: "kubevirt-hyperconverged"}, hco); err == nil {
+			foundHCO = true
+			conditions, found, _ := unstructured.NestedSlice(hco.Object, "status", "conditions")
+			if found {
+				for _, condRaw := range conditions {
+					cond, ok := condRaw.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					cType, _ := cond["type"].(string)
+					cStatus, _ := cond["status"].(string)
+					if cType == "Degraded" && cStatus == "True" {
+						status.HyperConvergedHealth = "Degraded"
+					}
 				}
-				cType, _ := cond["type"].(string)
-				cStatus, _ := cond["status"].(string)
-				if cType == "Degraded" && cStatus == "True" {
-					status.HyperConvergedHealth = "Degraded"
+			}
+			break
+		}
+	}
+	if !foundHCO {
+		status.HyperConvergedHealth = "Unknown"
+	}
+
+	// 2. Check virt-handler DaemonSet readiness
+	var dsList unstructured.UnstructuredList
+	dsList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "apps",
+		Version: "v1",
+		Kind:    "DaemonSet",
+	})
+	for _, ns := range []string{"openshift-cnv", "kubevirt"} {
+		if err := r.List(ctx, &dsList, client.InNamespace(ns), client.MatchingLabels{"kubevirt.io": "virt-handler"}); err == nil && len(dsList.Items) > 0 {
+			for _, ds := range dsList.Items {
+				desired, _, _ := unstructured.NestedInt64(ds.Object, "status", "desiredNumberScheduled")
+				ready, _, _ := unstructured.NestedInt64(ds.Object, "status", "numberReady")
+				if desired > 0 && ready < desired {
+					status.VirtHandlerReady = false
+				}
+			}
+		}
+	}
+
+	// 3. Query VirtualMachineInstanceMigration CRs to count active and stalled migrations
+	var vmimList unstructured.UnstructuredList
+	vmimList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "kubevirt.io",
+		Version: "v1",
+		Kind:    "VirtualMachineInstanceMigration",
+	})
+	targetNS := appNamespace
+	if targetNS == "" {
+		targetNS = "default"
+	}
+	if err := r.List(ctx, &vmimList, client.InNamespace(targetNS), client.Limit(100)); err == nil {
+		for _, vmim := range vmimList.Items {
+			phase, _, _ := unstructured.NestedString(vmim.Object, "status", "phase")
+			switch phase {
+			case "Scheduling", "Scheduled", "PreparingTarget", "TargetReady", "Running":
+				status.ActiveMigrations++
+			case "Failed":
+				status.StalledMigrations++
+			}
+			conditions, found, _ := unstructured.NestedSlice(vmim.Object, "status", "conditions")
+			if found {
+				for _, condRaw := range conditions {
+					cond, ok := condRaw.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					cType, _ := cond["type"].(string)
+					cStatus, _ := cond["status"].(string)
+					if cType == "Stalled" && cStatus == "True" {
+						status.StalledMigrations++
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Query VirtualMachineInstance CRs to count unmigratable VMIs
+	var vmiList unstructured.UnstructuredList
+	vmiList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "kubevirt.io",
+		Version: "v1",
+		Kind:    "VirtualMachineInstance",
+	})
+	if err := r.List(ctx, &vmiList, client.InNamespace(targetNS), client.Limit(100)); err == nil {
+		for _, vmi := range vmiList.Items {
+			conditions, found, _ := unstructured.NestedSlice(vmi.Object, "status", "conditions")
+			if found {
+				for _, condRaw := range conditions {
+					cond, ok := condRaw.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					cType, _ := cond["type"].(string)
+					cStatus, _ := cond["status"].(string)
+					if cType == "LiveMigratable" && cStatus == "False" {
+						status.UnmigratableVMIs++
+					}
 				}
 			}
 		}

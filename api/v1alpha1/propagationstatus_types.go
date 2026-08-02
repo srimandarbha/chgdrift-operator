@@ -98,6 +98,7 @@ type MachineConfigPoolStatus struct {
 	ReadyMachineCount     int32              `json:"readyMachineCount,omitempty"`
 	UpdatedNodeCount      int32              `json:"updatedNodeCount,omitempty"`
 	UpdatingNodeCount     int32              `json:"updatingNodeCount,omitempty"`
+	UnavailableNodeCount  int32              `json:"unavailableNodeCount,omitempty"`
 	DegradedNodeCount     int32              `json:"degradedNodeCount,omitempty"`
 	CurrentRenderedConfig string             `json:"currentRenderedConfig,omitempty"`
 	DesiredRenderedConfig string             `json:"desiredRenderedConfig,omitempty"`

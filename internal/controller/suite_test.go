@@ -167,6 +167,22 @@ func TestChangeWindowReconcile(t *testing.T) {
 					Health:           "Healthy",
 					ObservedAt:       metav1.NewTime(now.Add(-1 * time.Minute)),
 					State:            "InSync",
+					MCPStatus: gitopsv1alpha1.MachineConfigPoolStatus{
+						Name:                  "virt-worker",
+						MachineCount:          3,
+						ReadyMachineCount:     3,
+						UpdatedNodeCount:      3,
+						UpdatingNodeCount:     0,
+						UnavailableNodeCount:  0,
+						DegradedNodeCount:     0,
+						CurrentRenderedConfig: "rendered-1",
+						DesiredRenderedConfig: "rendered-1",
+						Phase:                 "Updated",
+					},
+					VirtStatus: gitopsv1alpha1.VirtualizationImpactStatus{
+						HyperConvergedHealth: "Healthy",
+						VirtHandlerReady:     true,
+					},
 				},
 			},
 		},
@@ -222,7 +238,6 @@ func TestTriStateFailClosedGating(t *testing.T) {
 	startTime := metav1.NewTime(now.Add(-10 * time.Minute))
 	endTime := metav1.NewTime(now.Add(50 * time.Minute))
 
-	// CHG with empty impactedApps -> MUST FAIL CLOSED with GateStatusUnknown
 	chgEmpty := &gitopsv1alpha1.ChangeWindow{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "chg-empty",
@@ -232,7 +247,7 @@ func TestTriStateFailClosedGating(t *testing.T) {
 			CHGNumber:    "CHG-EMPTY",
 			ReleaseTag:   "v1.0.0",
 			RootApp:      "app-root",
-			ImpactedApps: []string{}, // Empty!
+			ImpactedApps: []string{},
 			StartTime:    startTime,
 			EndTime:      endTime,
 		},
@@ -269,6 +284,120 @@ func TestTriStateFailClosedGating(t *testing.T) {
 	}
 	if updatedCHG.Status.Validation.GateResults[0].Status != gitopsv1alpha1.GateStatusUnknown {
 		t.Errorf("expected GateStatusUnknown for empty impactedApps, got %s", updatedCHG.Status.Validation.GateResults[0].Status)
+	}
+}
+
+func TestStabilizationResetOnRegression(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	now := time.Now()
+	startTime := metav1.NewTime(now.Add(-10 * time.Minute))
+	endTime := metav1.NewTime(now.Add(50 * time.Minute))
+	stabStart := metav1.NewTime(now.Add(-5 * time.Minute))
+
+	// CHG previously had stabilization started, but now state is OutOfSync
+	chg := &gitopsv1alpha1.ChangeWindow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chg-regress",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.ChangeWindowSpec{
+			CHGNumber:                  "CHG-REGRESS",
+			ReleaseTag:                 "v1.0.0",
+			ImpactedApps:               []string{"svc-payments"},
+			StartTime:                  startTime,
+			EndTime:                    endTime,
+			StabilizationPeriodSeconds: 300,
+		},
+		Status: gitopsv1alpha1.ChangeWindowStatus{
+			StabilizationStartedAt: &stabStart,
+		},
+	}
+
+	ps := &gitopsv1alpha1.PropagationStatus{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "svc-payments",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.PropagationStatusSpec{
+			AppName:        "svc-payments",
+			TargetClusters: []string{"us-east-01"},
+		},
+		Status: gitopsv1alpha1.PropagationStatusStatus{
+			Phase: "Diverged",
+			ClusterStates: []gitopsv1alpha1.ClusterRevisionState{
+				{
+					ClusterName: "us-east-01",
+					State:       "Diverged", // OutOfSync regression
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(chg, ps).
+		WithStatusSubresource(chg, ps).
+		WithIndex(&gitopsv1alpha1.PropagationStatus{}, "spec.appName", func(obj client.Object) []string {
+			p, ok := obj.(*gitopsv1alpha1.PropagationStatus)
+			if !ok || p.Spec.AppName == "" {
+				return nil
+			}
+			return []string{p.Spec.AppName}
+		}).
+		Build()
+
+	r := &ChangeWindowReconciler{
+		Client: fakeClient,
+	}
+
+	req := ctrlRequest("default", "chg-regress")
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	var updatedCHG gitopsv1alpha1.ChangeWindow
+	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "chg-regress"}, &updatedCHG); err != nil {
+		t.Fatalf("failed to fetch updated ChangeWindow: %v", err)
+	}
+
+	if updatedCHG.Status.StabilizationStartedAt != nil {
+		t.Errorf("expected StabilizationStartedAt to be reset to nil on regression, got %v", updatedCHG.Status.StabilizationStartedAt)
+	}
+}
+
+func TestParkedActionEmptyLogRef(t *testing.T) {
+	r := &ChangeWindowReconciler{}
+	now := time.Now()
+
+	chg := &gitopsv1alpha1.ChangeWindow{
+		Spec: gitopsv1alpha1.ChangeWindowSpec{
+			CHGNumber:       "CHG-999",
+			EvidenceRepoURL: "https://nexus.example.com",
+		},
+		Status: gitopsv1alpha1.ChangeWindowStatus{
+			Actions: make(map[string]gitopsv1alpha1.ActionRecord),
+		},
+	}
+
+	cs := gitopsv1alpha1.ClusterRevisionState{
+		ClusterName: "us-east-01",
+		State:       "Diverged",
+	}
+
+	r.runParkedHardRefreshAction(chg, "svc-payments", cs, now)
+
+	action := chg.Status.Actions["svc-payments/us-east-01"]
+	if len(action.History) == 0 {
+		t.Fatalf("expected action history record")
+	}
+	if action.History[0].LogRef != "" {
+		t.Errorf("expected empty LogRef for Parked action, got %s", action.History[0].LogRef)
 	}
 }
 

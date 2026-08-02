@@ -1,0 +1,4 @@
+resources:
+- bases/gitops.example.com_changewindows.yaml
+- bases/gitops.example.com_clusterappreports.yaml
+- bases/gitops.example.com_propagationstatuses.yaml

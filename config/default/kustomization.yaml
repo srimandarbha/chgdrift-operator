@@ -1,0 +1,19 @@
+# Umbrella composition for drift-operator deployment
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: gitops-fleet
+
+resources:
+- ../crd
+- ../rbac
+- ../manager
+- ../networkpolicy/allow_operator_egress.yaml
+- ../prometheus/servicemonitor.yaml
+- ../prometheus/alerts.yaml
+
+labels:
+- includeSelectors: true
+  pairs:
+    app.kubernetes.io/name: drift-operator
+    app.kubernetes.io/part-of: gitops-fleet
