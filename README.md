@@ -68,7 +68,7 @@ drift-operator/
   - `ChangeWindow`: Manages CHG maintenance windows, maintenance silence, log collection, MCP rollout tracking, OpenShift Virtualization live migration tracking, and Kafka reporting.
 - **Real Kafka Integration (`internal/kafka/kafka_bridge.go`)**:
   - Ingests `CHG_INITIATED` events from topic `gitops.chg.events` to dynamically create `ChangeWindow` CRs with context-aware retry loops to guarantee zero message loss on K8s API server downtime.
-  - Emits LLM-understandable validation reports to topic `gitops.change.validation`.
+  - Emits LLM-understandable validation reports to topic `gitops.change.validation` **immediately on phase changes, component updates, or issues found**, with a **15-minute throttled heartbeat** during steady-state.
   - Full mTLS & TLS Common Name (CN) / SAN hostname verification (`InsecureSkipVerify: false`).
 - **OpenShift Infrastructure & OpenShift Virtualization Maintenance Validation**:
   - Direct infrastructure telemetry tracking OpenShift `ClusterOperator` health (`Available=True`, `Degraded=False`), `MachineConfigPoolStatus` (nodes updating vs. unavailable), `HyperConverged` health, `virt-handler` DaemonSet readiness, `VirtualMachineInstanceMigration` phase breakdown (active vs. stalled), and `VirtualMachineInstance` live-migratability.

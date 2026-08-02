@@ -42,7 +42,7 @@ The system uses **exactly two Kafka topics** for communication:
 | Topic Name | Direction | Publisher | Consumer | Purpose |
 | :--- | :--- | :--- | :--- | :--- |
 | **`gitops.chg.events`** | Ingestion | ServiceNow / CI/CD / SRE Agent | `drift-operator` (`KafkaBridge`) | Triggers maintenance windows (`CHG0012345`) and creates `ChangeWindow` CRs. |
-| **`gitops.change.validation`** | Emission | `drift-operator` (`ChangeWindowReconciler`) | Central SRE Agent / ChatOps / ITSM | Emits post-deployment LLM validation reports and 6-gate health assessments. |
+| **`gitops.change.validation`** | Emission | `drift-operator` (`ChangeWindowReconciler`) | Central SRE Agent / ChatOps / ITSM | Emits post-deployment LLM validation reports and 8-gate health assessments immediately on phase/state changes, with a 15-minute throttled heartbeat. |
 
 ---
 

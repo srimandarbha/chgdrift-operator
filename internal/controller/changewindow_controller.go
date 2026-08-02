@@ -175,11 +175,15 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		requeueAfter = 15 * time.Second
 	}
 
-	// 6. Generate Kafka JSON Report on phase transition or 60s tick
-	if chg.Status.Phase != previousPhase || now.Sub(chg.Status.LastReportedAt.Time) > 60*time.Second {
+	// 6. Generate Kafka JSON Report immediately on phase change, validation state change, or 15-minute heartbeat tick
+	validationChanged := !reflect.DeepEqual(original.Status.Validation, chg.Status.Validation)
+	phaseChanged := chg.Status.Phase != previousPhase
+	timeForHeartbeat := now.Sub(chg.Status.LastReportedAt.Time) >= 15*time.Minute
+
+	if phaseChanged || validationChanged || timeForHeartbeat {
 		reportPayload, err := r.BuildKafkaReportJSON(&chg, now)
 		if err == nil {
-			logger.Info("Kafka report compiled", "chg", chg.Spec.CHGNumber, "phase", chg.Status.Phase, "payloadSizeBytes", len(reportPayload))
+			logger.Info("Kafka report compiled", "chg", chg.Spec.CHGNumber, "phase", chg.Status.Phase, "payloadSizeBytes", len(reportPayload), "phaseChanged", phaseChanged, "validationChanged", validationChanged, "heartbeat", timeForHeartbeat)
 			publishedSuccessfully := true
 			if r.KafkaBridge != nil {
 				if kerr := r.KafkaBridge.ProduceReport(ctx, chg.Spec.CHGNumber, reportPayload); kerr != nil {
