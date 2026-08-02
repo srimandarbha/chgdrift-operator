@@ -1,0 +1,10 @@
+apiVersion: gitops.example.com/v1alpha1
+kind: PropagationStatus
+metadata:
+  name: payments-api
+  namespace: gitops-fleet
+spec:
+  appName: payments-api
+  expectedRevision: rev-100
+  targetClusters:
+    - lab-cluster-01

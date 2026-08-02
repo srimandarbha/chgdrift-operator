@@ -85,11 +85,12 @@ func NewKafkaBridge(cfg KafkaConfig, k8sClient client.Client, namespace string) 
 	}
 
 	writer := &kafka.Writer{
-		Addr:         kafka.TCP(cfg.Brokers...),
-		Topic:        cfg.EmitTopic,
-		Balancer:     &kafka.LeastBytes{},
-		RequiredAcks: kafka.RequireAll,
-		Async:        false,
+		Addr:                   kafka.TCP(cfg.Brokers...),
+		Topic:                  cfg.EmitTopic,
+		Balancer:               &kafka.LeastBytes{},
+		RequiredAcks:           kafka.RequireAll,
+		Async:                  false,
+		AllowAutoTopicCreation: true,
 	}
 	if dialer != nil {
 		writer.Transport = &kafka.Transport{

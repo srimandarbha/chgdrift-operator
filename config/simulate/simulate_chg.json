@@ -1,0 +1,26 @@
+{
+  "eventType": "CHG_INITIATED",
+  "eventId": "evt-sim-1003",
+  "timestamp": "2026-08-02T14:20:00Z",
+  "chgDetails": {
+    "chgNumber": "CHG-TEST-1003",
+    "requestedBy": "lab-tester@company.com",
+    "startTime": "2026-08-02T14:00:00Z",
+    "endTime": "2026-08-02T16:00:00Z",
+    "staleReportThresholdSeconds": 300
+  },
+  "gitDetails": {
+    "releaseTag": "v2.4.0",
+    "expectedRevision": "rev-100",
+    "baselineRevision": "rev-099"
+  },
+  "blastRadius": {
+    "rootApp": "platform-root",
+    "impactedApps": [
+      "payments-api"
+    ],
+    "targetClusters": [
+      "lab-cluster-01"
+    ]
+  }
+}

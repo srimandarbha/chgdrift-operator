@@ -1,0 +1,21 @@
+apiVersion: gitops.example.com/v1alpha1
+kind: ClusterAppReport
+metadata:
+  name: lab-cluster-01-payments-api
+  namespace: gitops-fleet
+  labels:
+    gitops.example.com/app: payments-api
+spec:
+  clusterName: lab-cluster-01
+  appName: payments-api
+  observedRevision: rev-100
+  syncStatus: Synced
+  health: Healthy
+  observedAt: "2026-08-02T19:00:00Z"
+  mcpStatus:
+    name: worker
+    machineCount: 4
+    updatedNodeCount: 4
+    updatingNodeCount: 0
+    degradedNodeCount: 0
+    phase: Updated

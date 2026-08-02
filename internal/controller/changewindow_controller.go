@@ -178,7 +178,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// 6. Generate Kafka JSON Report immediately on phase change, validation state change, or 15-minute heartbeat tick
 	validationChanged := !reflect.DeepEqual(original.Status.Validation, chg.Status.Validation)
 	phaseChanged := chg.Status.Phase != previousPhase
-	timeForHeartbeat := now.Sub(chg.Status.LastReportedAt.Time) >= 15*time.Minute
+	timeForHeartbeat := !chg.Status.LastReportedAt.IsZero() && now.Sub(chg.Status.LastReportedAt.Time) >= 15*time.Minute
 
 	if phaseChanged || validationChanged || timeForHeartbeat {
 		reportPayload, err := r.BuildKafkaReportJSON(&chg, now)
@@ -456,6 +456,25 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 	for _, s := range chg.Status.SilentClusters {
 		issues = append(issues, fmt.Sprintf("%s/%s: cluster reporting silent (%s)", s.App, s.Cluster, s.State))
 	}
+	preserveObservedAt := func(gate *gitopsv1alpha1.GateResult) {
+		for _, prevGate := range chg.Status.Validation.GateResults {
+			if prevGate.Name == gate.Name {
+				if prevGate.Status == gate.Status && prevGate.Reason == gate.Reason && prevGate.Message == gate.Message && !prevGate.ObservedAt.IsZero() {
+					gate.ObservedAt = prevGate.ObservedAt
+				}
+				break
+			}
+		}
+	}
+
+	preserveObservedAt(&gateClusterOps)
+	preserveObservedAt(&gateAllChanges)
+	preserveObservedAt(&gateHealth)
+	preserveObservedAt(&gateMCP)
+	preserveObservedAt(&gateEvents)
+	preserveObservedAt(&gateObjects)
+	preserveObservedAt(&gateDeps)
+	preserveObservedAt(&gateVirt)
 
 	gateResults := []gitopsv1alpha1.GateResult{
 		gateClusterOps,
