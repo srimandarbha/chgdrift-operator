@@ -182,9 +182,22 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		requeueAfter = 15 * time.Second
 	}
 
-	// 6. Generate Kafka JSON Report immediately on phase change, validation state change, or 15-minute heartbeat tick
+	// 6. Record timeline entry on phase change
 	validationChanged := !reflect.DeepEqual(original.Status.Validation, chg.Status.Validation)
 	phaseChanged := chg.Status.Phase != previousPhase
+	if phaseChanged {
+		chg.Status.Timeline = append(chg.Status.Timeline, gitopsv1alpha1.TimelineEntry{
+			Timestamp:   metav1.NewTime(now),
+			Stage:       chg.Status.Phase,
+			Category:    "Platform",
+			Resource:    chg.Spec.CHGNumber,
+			Event:       "PhaseTransition",
+			Description: fmt.Sprintf("Maintenance window phase transitioned from '%s' to '%s'", previousPhase, chg.Status.Phase),
+		})
+		if len(chg.Status.Timeline) > 50 {
+			chg.Status.Timeline = chg.Status.Timeline[len(chg.Status.Timeline)-50:]
+		}
+	}
 	timeForHeartbeat := !chg.Status.LastReportedAt.IsZero() && now.Sub(chg.Status.LastReportedAt.Time) >= 15*time.Minute
 
 	if phaseChanged || validationChanged || timeForHeartbeat {

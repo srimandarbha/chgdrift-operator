@@ -126,6 +126,24 @@ type VirtualizationWorkloadSummary struct {
 	UnmigratableVMIs   int32 `json:"unmigratableVMIs,omitempty"`
 }
 
+// CausalNode describes a single node in the platform dependency graph.
+type CausalNode struct {
+	Stage       string   `json:"stage"`                 // ClusterVersion | NodeConfig | ControlPlane | VirtOperators | WorkloadExecution | LiveMigration
+	Resource    string   `json:"resource"`              // e.g. MachineConfigPool/worker, KubeVirt/kubevirt-kubevirt
+	Status      string   `json:"status"`                // Healthy | Degraded | Updating | Unknown
+	RootCauseOf []string `json:"rootCauseOf,omitempty"` // Downstream resources impacted
+	ImpactedBy  string   `json:"impactedBy,omitempty"`  // Upstream cause
+}
+
+// DependencyGraphResult encapsulates causal dependency evaluation across the platform stack.
+type DependencyGraphResult struct {
+	Healthy           bool         `json:"healthy"`
+	RootCauseResource string       `json:"rootCauseResource,omitempty"`
+	RootCauseSummary  string       `json:"rootCauseSummary,omitempty"`
+	// +listType=atomic
+	Nodes             []CausalNode `json:"nodes,omitempty"`
+}
+
 // PlatformObservationStatus encapsulates infrastructure observation telemetry.
 type PlatformObservationStatus struct {
 	// +listType=atomic
@@ -141,6 +159,7 @@ type PlatformObservationStatus struct {
 	NodeMaintenance    NodeMaintenanceStatus       `json:"nodeMaintenance,omitempty"`
 	// +listType=atomic
 	MigrationPolicies  []MigrationPolicyStatus     `json:"migrationPolicies,omitempty"`
+	DependencyGraph    DependencyGraphResult       `json:"dependencyGraph,omitempty"`
 	ObservedAt         metav1.Time                 `json:"observedAt,omitempty"`
 }
 
@@ -457,6 +476,17 @@ type ValidationResult struct {
 	Passed bool `json:"passed"`
 }
 
+// TimelineEntry records a single state transition or evidence event during a maintenance window.
+type TimelineEntry struct {
+	Timestamp    metav1.Time `json:"timestamp"`
+	Stage        string      `json:"stage"`        // PreChecking | InProgress | Stabilizing
+	Category     string      `json:"category"`     // Platform | Workload | Event | Log
+	Resource     string      `json:"resource"`     // e.g. NodeMaintenance/node-01
+	Event        string      `json:"event"`        // Created | Updated | Degraded | Recovered
+	Description  string      `json:"description"`  // Human & LLM readable summary
+	CausalImpact string      `json:"causalImpact,omitempty"`
+}
+
 type ChangeWindowStatus struct {
 	Phase                  string                        `json:"phase,omitempty"`
 	OverallStatus          string                        `json:"overallStatus,omitempty"`
@@ -467,6 +497,8 @@ type ChangeWindowStatus struct {
 	LastReportedAt         metav1.Time                   `json:"lastReportedAt,omitempty"`
 	AppStates              map[string]AppClusterStateMap `json:"appStates,omitempty"`
 	Baseline               *BaselineSnapshot             `json:"baseline,omitempty"`
+	// +listType=atomic
+	Timeline               []TimelineEntry               `json:"timeline,omitempty"`
 }
 
 type AppClusterStateMap struct {

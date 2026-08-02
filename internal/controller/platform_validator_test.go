@@ -306,3 +306,59 @@ func TestMachineConfigAndStorageClassDependencies(t *testing.T) {
 		t.Errorf("expected nonexistent StorageClass to be unready")
 	}
 }
+
+func TestEvaluatePlatformDependencyGraph_UpstreamRootCause(t *testing.T) {
+	obs := gitopsv1alpha1.PlatformObservationStatus{
+		ClusterVersion: gitopsv1alpha1.ClusterVersionStatus{
+			Version:        "4.14.0",
+			DesiredVersion: "4.14.2",
+			Progressing:    true,
+			Available:      true,
+		},
+		MachineConfigPools: []gitopsv1alpha1.MachineConfigPoolStatus{
+			{Name: "worker", Phase: "Updating"},
+		},
+		VirtHealth: gitopsv1alpha1.VirtualizationImpactStatus{
+			StalledMigrations: 2,
+		},
+	}
+
+	graph := EvaluatePlatformDependencyGraph(obs)
+	if graph.Healthy {
+		t.Errorf("expected graph to be unhealthy due to progressing ClusterVersion")
+	}
+	if graph.RootCauseResource != "ClusterVersion/version" {
+		t.Errorf("expected root cause ClusterVersion/version, got %s", graph.RootCauseResource)
+	}
+	if len(graph.Nodes) != 6 {
+		t.Fatalf("expected 6 causal stages, got %d", len(graph.Nodes))
+	}
+	if graph.Nodes[1].ImpactedBy != "ClusterVersion/version" {
+		t.Errorf("expected stage 2 NodeConfig to be impacted by ClusterVersion/version, got %s", graph.Nodes[1].ImpactedBy)
+	}
+}
+
+func TestEvaluatePlatformDependencyGraph_MCPRootCause(t *testing.T) {
+	obs := gitopsv1alpha1.PlatformObservationStatus{
+		ClusterVersion: gitopsv1alpha1.ClusterVersionStatus{
+			Version:     "4.14.0",
+			Progressing: false,
+			Available:   true,
+		},
+		MachineConfigPools: []gitopsv1alpha1.MachineConfigPoolStatus{
+			{Name: "virt-worker", Phase: "Updating"},
+		},
+		VirtHealth: gitopsv1alpha1.VirtualizationImpactStatus{
+			StalledMigrations: 1,
+		},
+	}
+
+	graph := EvaluatePlatformDependencyGraph(obs)
+	if graph.Healthy {
+		t.Errorf("expected graph to be unhealthy due to updating MCP")
+	}
+	if graph.RootCauseResource != "MachineConfigPool/virt-worker" {
+		t.Errorf("expected root cause MachineConfigPool/virt-worker, got %s", graph.RootCauseResource)
+	}
+}
+

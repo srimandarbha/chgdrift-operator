@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -451,6 +452,127 @@ func TestClusterDetector_HubByMultiClusterHub(t *testing.T) {
 
 	isHub := DetectClusterRole(ctx, client)
 	if !isHub {
-		t.Errorf("expected DetectClusterRole to return true (hub) when MultiClusterHub resource exists")
+		t.Errorf("expected DetectClusterRole to return true (hub) when MultiClusterHub CR is found")
+	}
+}
+
+func TestChangeWindow_TimelineRecording(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	now := time.Now()
+	chg := &gitopsv1alpha1.ChangeWindow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chg-timeline-test",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.ChangeWindowSpec{
+			CHGNumber: "CHG-TIMELINE-01",
+			StartTime: metav1.NewTime(now.Add(-10 * time.Minute)),
+			EndTime:   metav1.NewTime(now.Add(1 * time.Hour)),
+		},
+		Status: gitopsv1alpha1.ChangeWindowStatus{
+			Phase: "Pending",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(chg).
+		WithStatusSubresource(chg).
+		Build()
+
+	r := &ChangeWindowReconciler{
+		Client: fakeClient,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "chg-timeline-test"},
+	}
+
+	_, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	var updated gitopsv1alpha1.ChangeWindow
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &updated); err != nil {
+		t.Fatalf("failed to fetch updated ChangeWindow: %v", err)
+	}
+
+	if len(updated.Status.Timeline) == 0 {
+		t.Fatalf("expected Timeline entries to be recorded on phase transition")
+	}
+
+	entry := updated.Status.Timeline[0]
+	if entry.Category != "Platform" || entry.Event != "PhaseTransition" {
+		t.Errorf("unexpected timeline entry: %+v", entry)
+	}
+}
+
+func TestChangeWindow_StalledVMIMigration(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	now := time.Now()
+	chg := &gitopsv1alpha1.ChangeWindow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chg-stalled-vmi",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.ChangeWindowSpec{
+			CHGNumber: "CHG-STALLED-01",
+			StartTime: metav1.NewTime(now.Add(-10 * time.Minute)),
+			EndTime:   metav1.NewTime(now.Add(1 * time.Hour)),
+		},
+		Status: gitopsv1alpha1.ChangeWindowStatus{
+			Phase: "PreChecking",
+		},
+	}
+
+	report := &gitopsv1alpha1.ClusterAppReport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "us-east-01-app",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.ClusterAppReportSpec{
+			ClusterName: "us-east-01",
+			AppName:     "app",
+			SyncStatus:  "Synced",
+			Health:      "Healthy",
+			PlatformObservation: gitopsv1alpha1.PlatformObservationStatus{
+				VirtHealth: gitopsv1alpha1.VirtualizationImpactStatus{
+					HyperConvergedHealth: "Healthy",
+					VirtHandlerReady:     true,
+					StalledMigrations:    3,
+				},
+			},
+			ObservedAt: metav1.NewTime(now),
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(chg, report).
+		WithStatusSubresource(chg).
+		WithIndex(&gitopsv1alpha1.ClusterAppReport{}, "spec.appName", func(obj client.Object) []string {
+			rep, ok := obj.(*gitopsv1alpha1.ClusterAppReport)
+			if !ok || rep.Spec.AppName == "" {
+				return nil
+			}
+			return []string{rep.Spec.AppName}
+		}).
+		Build()
+
+	r := &ChangeWindowReconciler{Client: fakeClient}
+	validationRes, _ := r.evaluateGates(context.Background(), chg, now)
+
+	if validationRes.VirtImpactPassed {
+		t.Errorf("expected VirtImpactPassed gate to fail when StalledMigrations > 0")
+	}
+	if validationRes.Passed {
+		t.Errorf("expected validation outcome to fail when VirtImpactPassed is false")
 	}
 }

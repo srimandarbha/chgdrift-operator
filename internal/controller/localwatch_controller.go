@@ -139,7 +139,7 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		allMCPs = []gitopsv1alpha1.MachineConfigPoolStatus{spec.MCPStatus}
 	}
 
-	spec.PlatformObservation = gitopsv1alpha1.PlatformObservationStatus{
+	platformObs := gitopsv1alpha1.PlatformObservationStatus{
 		ClusterOperators:   clusterOps,
 		MachineConfigPools: allMCPs,
 		VirtHealth:         virtHealth,
@@ -152,6 +152,8 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		MigrationPolicies:  r.readMigrationPolicies(ctx),
 		ObservedAt:         metav1.Now(),
 	}
+	platformObs.DependencyGraph = EvaluatePlatformDependencyGraph(platformObs)
+	spec.PlatformObservation = platformObs
 
 	if err := r.upsertReport(ctx, reportName, spec); err != nil {
 		if apierrors.IsConflict(err) {

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -311,3 +312,190 @@ func (r *LocalAppWatchReconciler) readAllMachineConfigPools(ctx context.Context)
 
 	return results
 }
+
+// EvaluatePlatformDependencyGraph evaluates OpenShift platform health across the 6-stage
+// causal dependency chain:
+//
+//   Stage 1: ClusterVersion (Base OCP platform)
+//   Stage 2: NodeConfig (MachineConfigPools)
+//   Stage 3: ControlPlane (ClusterOperators)
+//   Stage 4: VirtOperators (KubeVirt, CDI, SSP)
+//   Stage 5: WorkloadExecution (virt-handler, NodeMaintenance)
+//   Stage 6: LiveMigration (VMI Migrations & Workloads)
+//
+// When an upstream component fails, downstream nodes document the upstream root cause.
+func EvaluatePlatformDependencyGraph(obs gitopsv1alpha1.PlatformObservationStatus) gitopsv1alpha1.DependencyGraphResult {
+	var nodes []gitopsv1alpha1.CausalNode
+	var rootCauseResource string
+	var rootCauseSummary string
+
+	// Stage 1: ClusterVersion
+	stage1Status := "Healthy"
+	if obs.ClusterVersion.Progressing {
+		stage1Status = "Updating"
+		if rootCauseResource == "" {
+			rootCauseResource = "ClusterVersion/version"
+			rootCauseSummary = "ClusterVersion upgrade is actively progressing"
+		}
+	} else if !obs.ClusterVersion.Available && obs.ClusterVersion.Version != "" {
+		stage1Status = "Degraded"
+		if rootCauseResource == "" {
+			rootCauseResource = "ClusterVersion/version"
+			rootCauseSummary = "ClusterVersion reports Available=False"
+		}
+	}
+	nodes = append(nodes, gitopsv1alpha1.CausalNode{
+		Stage:    "ClusterVersion",
+		Resource: "ClusterVersion/version",
+		Status:   stage1Status,
+	})
+
+	// Stage 2: NodeConfig (MachineConfigPools)
+	stage2Status := "Healthy"
+	var updatingMCP string
+	for _, mcp := range obs.MachineConfigPools {
+		if mcp.Phase == "Updating" || mcp.Phase == "Degraded" {
+			stage2Status = mcp.Phase
+			updatingMCP = "MachineConfigPool/" + mcp.Name
+			if rootCauseResource == "" {
+				rootCauseResource = updatingMCP
+				rootCauseSummary = "MachineConfigPool " + mcp.Name + " is in phase " + mcp.Phase
+			}
+			break
+		}
+	}
+	node2 := gitopsv1alpha1.CausalNode{
+		Stage:    "NodeConfig",
+		Resource: "MachineConfigPools",
+		Status:   stage2Status,
+	}
+	if stage1Status != "Healthy" {
+		node2.ImpactedBy = "ClusterVersion/version"
+	}
+	nodes = append(nodes, node2)
+
+	// Stage 3: ControlPlane (ClusterOperators)
+	stage3Status := "Healthy"
+	var degradedCO string
+	for _, co := range obs.ClusterOperators {
+		if co.Degraded || !co.Available {
+			stage3Status = "Degraded"
+			degradedCO = "ClusterOperator/" + co.Name
+			if rootCauseResource == "" {
+				rootCauseResource = degradedCO
+				rootCauseSummary = "ClusterOperator " + co.Name + " is Degraded or Unavailable"
+			}
+			break
+		}
+	}
+	node3 := gitopsv1alpha1.CausalNode{
+		Stage:    "ControlPlane",
+		Resource: "ClusterOperators",
+		Status:   stage3Status,
+	}
+	if stage2Status != "Healthy" {
+		node3.ImpactedBy = updatingMCP
+	} else if stage1Status != "Healthy" {
+		node3.ImpactedBy = "ClusterVersion/version"
+	}
+	nodes = append(nodes, node3)
+
+	// Stage 4: VirtOperators (KubeVirt, CDI, SSP)
+	stage4Status := "Healthy"
+	var unreadyVirtOp string
+	if obs.KubeVirt.Phase != "" && obs.KubeVirt.Phase != "Deployed" {
+		stage4Status = "Updating"
+		unreadyVirtOp = "KubeVirt/kubevirt"
+	} else if obs.CDI.Phase != "" && obs.CDI.Phase != "Deployed" {
+		stage4Status = "Updating"
+		unreadyVirtOp = "CDI/cdi"
+	} else if obs.SSP.Phase != "" && obs.SSP.Phase != "Deployed" {
+		stage4Status = "Updating"
+		unreadyVirtOp = "SSP/ssp"
+	}
+	if stage4Status != "Healthy" && rootCauseResource == "" {
+		rootCauseResource = unreadyVirtOp
+		rootCauseSummary = unreadyVirtOp + " operator phase is not Deployed"
+	}
+	node4 := gitopsv1alpha1.CausalNode{
+		Stage:    "VirtOperators",
+		Resource: "KubeVirtOperators",
+		Status:   stage4Status,
+	}
+	if stage3Status != "Healthy" {
+		node4.ImpactedBy = degradedCO
+	} else if stage2Status != "Healthy" {
+		node4.ImpactedBy = updatingMCP
+	}
+	nodes = append(nodes, node4)
+
+	// Stage 5: WorkloadExecution (virt-handler, NodeMaintenance)
+	stage5Status := "Healthy"
+	var execCause string
+	if obs.NodeMaintenance.ActiveMaintenanceNodes > 0 {
+		stage5Status = "Maintenance"
+		execCause = "NodeMaintenance/active"
+		if rootCauseResource == "" {
+			rootCauseResource = execCause
+			rootCauseSummary = fmt.Sprintf("%d node(s) under active NodeMaintenance", obs.NodeMaintenance.ActiveMaintenanceNodes)
+		}
+	} else if obs.VirtHealth.VirtHandlerReady == false && obs.VirtHealth.HyperConvergedHealth != "" {
+		stage5Status = "Degraded"
+		execCause = "DaemonSet/virt-handler"
+		if rootCauseResource == "" {
+			rootCauseResource = execCause
+			rootCauseSummary = "virt-handler DaemonSet is not ready"
+		}
+	}
+	node5 := gitopsv1alpha1.CausalNode{
+		Stage:    "WorkloadExecution",
+		Resource: "NodeExecutionLayer",
+		Status:   stage5Status,
+	}
+	if stage4Status != "Healthy" {
+		node5.ImpactedBy = unreadyVirtOp
+	} else if stage2Status != "Healthy" {
+		node5.ImpactedBy = updatingMCP
+	}
+	nodes = append(nodes, node5)
+
+	// Stage 6: LiveMigration (VMI Migrations & Workloads)
+	stage6Status := "Healthy"
+	if obs.VirtHealth.StalledMigrations > 0 {
+		stage6Status = "Stalled"
+		if rootCauseResource == "" {
+			rootCauseResource = "VirtualMachineInstanceMigration/stalled"
+			rootCauseSummary = fmt.Sprintf("%d live migration(s) stalled", obs.VirtHealth.StalledMigrations)
+		}
+	}
+	node6 := gitopsv1alpha1.CausalNode{
+		Stage:    "LiveMigration",
+		Resource: "VMIWorkloads",
+		Status:   stage6Status,
+	}
+	if stage5Status != "Healthy" {
+		node6.ImpactedBy = execCause
+	} else if stage2Status != "Healthy" {
+		node6.ImpactedBy = updatingMCP
+	}
+	nodes = append(nodes, node6)
+
+	// Link root cause downstream impact
+	if rootCauseResource != "" {
+		for i := range nodes {
+			if nodes[i].Resource == rootCauseResource || (nodes[i].ImpactedBy == "" && nodes[i].Status != "Healthy") {
+				// mark root cause node
+			} else if nodes[i].ImpactedBy != "" {
+				nodes[i].RootCauseOf = append(nodes[i].RootCauseOf, "downstream-workloads")
+			}
+		}
+	}
+
+	return gitopsv1alpha1.DependencyGraphResult{
+		Healthy:           rootCauseResource == "",
+		RootCauseResource: rootCauseResource,
+		RootCauseSummary:  rootCauseSummary,
+		Nodes:             nodes,
+	}
+}
+
