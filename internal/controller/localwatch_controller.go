@@ -153,6 +153,8 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ObservedAt:         metav1.Now(),
 	}
 	platformObs.DependencyGraph = EvaluatePlatformDependencyGraph(platformObs)
+	platformObs.TopologicalDAG = EvaluateTopologicalDAG(platformObs)
+	platformObs.CorrelatedEvidence = r.correlateMultiSignalEvidence(ctx, desc.Namespace, spec.RecentEvents, spec.TailLogs)
 	spec.PlatformObservation = platformObs
 
 	if err := r.upsertReport(ctx, reportName, spec); err != nil {
@@ -734,6 +736,42 @@ func parseDescriptor(cm *corev1.ConfigMap) AppDescriptor {
 		Revision:   cm.Data["observedRevision"],
 	}
 	return desc
+}
+
+func (r *LocalAppWatchReconciler) correlateMultiSignalEvidence(ctx context.Context, namespace string, events []gitopsv1alpha1.EventSummary, logs []string) []gitopsv1alpha1.CorrelatedEvidence {
+	var evidence []gitopsv1alpha1.CorrelatedEvidence
+
+	for _, evt := range events {
+		sev := gitopsv1alpha1.SeverityWarning
+		if strings.Contains(evt.Reason, "Failed") || strings.Contains(evt.Reason, "Stalled") || strings.Contains(evt.Reason, "Error") {
+			sev = gitopsv1alpha1.SeverityCritical
+		}
+		evidence = append(evidence, gitopsv1alpha1.CorrelatedEvidence{
+			Timestamp: evt.LastObservedAt,
+			Component: evt.InvolvedObject,
+			ObjectID:  evt.InvolvedObject,
+			EventType: evt.Reason,
+			Message:   evt.Message,
+			Severity:  sev,
+			Source:    "K8sAPI",
+		})
+	}
+
+	for _, logLine := range logs {
+		if strings.Contains(logLine, "qemu monitor socket closed") || strings.Contains(logLine, "attachment failed") || strings.Contains(logLine, "domain-migrated") || strings.Contains(logLine, "ERROR") {
+			evidence = append(evidence, gitopsv1alpha1.CorrelatedEvidence{
+				Timestamp: metav1.Now(),
+				Component: "virt-handler",
+				ObjectID:  "pod/virt-handler",
+				EventType: "LogSignal",
+				Message:   logLine,
+				Severity:  gitopsv1alpha1.SeverityCritical,
+				Source:    "PodLog",
+			})
+		}
+	}
+
+	return evidence
 }
 
 // -------------------------------------------------------------------------

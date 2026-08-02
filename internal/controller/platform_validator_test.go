@@ -362,3 +362,33 @@ func TestEvaluatePlatformDependencyGraph_MCPRootCause(t *testing.T) {
 	}
 }
 
+func TestEvaluateTopologicalDAG_ParentFailureHaltsChildren(t *testing.T) {
+	obs := gitopsv1alpha1.PlatformObservationStatus{
+		MachineConfigPools: []gitopsv1alpha1.MachineConfigPoolStatus{
+			{Name: "worker", Phase: "Updating"},
+		},
+		VirtHealth: gitopsv1alpha1.VirtualizationImpactStatus{
+			VirtHandlerReady:  false,
+			StalledMigrations: 1,
+		},
+	}
+
+	dag := EvaluateTopologicalDAG(obs)
+	if !dag.Evaluated {
+		t.Fatalf("expected DAG to be evaluated")
+	}
+	if dag.Healthy {
+		t.Errorf("expected DAG to be unhealthy when parent MCP is updating")
+	}
+	if len(dag.Nodes) != 4 {
+		t.Fatalf("expected 4 nodes in topological DAG, got %d", len(dag.Nodes))
+	}
+	if dag.Nodes[1].State != "Blocked" || dag.Nodes[1].BlockedBy != "mcp/worker" {
+		t.Errorf("expected mcd/worker to be blocked by mcp/worker, got %+v", dag.Nodes[1])
+	}
+	if dag.Nodes[2].State != "Blocked" || dag.Nodes[2].BlockedBy != "mcd/worker" {
+		t.Errorf("expected virt-handler to be blocked by mcd/worker, got %+v", dag.Nodes[2])
+	}
+}
+
+

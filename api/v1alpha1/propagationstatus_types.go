@@ -126,6 +126,47 @@ type VirtualizationWorkloadSummary struct {
 	UnmigratableVMIs   int32 `json:"unmigratableVMIs,omitempty"`
 }
 
+// EvidenceSeverity describes the severity of correlated maintenance signals.
+type EvidenceSeverity string
+
+const (
+	SeverityInfo     EvidenceSeverity = "INFO"
+	SeverityWarning  EvidenceSeverity = "WARNING"
+	SeverityCritical EvidenceSeverity = "CRITICAL"
+)
+
+// CorrelatedEvidence correlates K8s API objects, warning events, and live pod logs.
+type CorrelatedEvidence struct {
+	Timestamp metav1.Time      `json:"timestamp"`
+	Component string           `json:"component"` // e.g. VirtualMachineInstanceMigration, virt-handler
+	ObjectID  string           `json:"objectId"`
+	EventType string           `json:"eventType"` // e.g. VMIStalled, StorageTargetNotReady, MultusNetworkAttachmentFailed
+	Message   string           `json:"message"`
+	Severity  EvidenceSeverity `json:"severity"`
+	Source    string           `json:"source"`    // K8sAPI | EventLog | PodLog
+}
+
+// ResourceNodeStatus describes a single node in a Topological DAG evaluation.
+type ResourceNodeStatus struct {
+	ID        string   `json:"id"`
+	Kind      string   `json:"kind"`
+	Namespace string   `json:"namespace,omitempty"`
+	Name      string   `json:"name"`
+	State     string   `json:"state"` // Healthy | Degraded | Updating | Blocked
+	// +listType=atomic
+	ParentIDs []string `json:"parentIds,omitempty"`
+	BlockedBy string   `json:"blockedBy,omitempty"`
+}
+
+// TopologicalDAGResult encapsulates topological dependency graph evaluation.
+type TopologicalDAGResult struct {
+	Evaluated     bool                 `json:"evaluated"`
+	Healthy       bool                 `json:"healthy"`
+	BlockedReason string               `json:"blockedReason,omitempty"`
+	// +listType=atomic
+	Nodes         []ResourceNodeStatus `json:"nodes,omitempty"`
+}
+
 // CausalNode describes a single node in the platform dependency graph.
 type CausalNode struct {
 	Stage       string   `json:"stage"`                 // ClusterVersion | NodeConfig | ControlPlane | VirtOperators | WorkloadExecution | LiveMigration
@@ -160,6 +201,9 @@ type PlatformObservationStatus struct {
 	// +listType=atomic
 	MigrationPolicies  []MigrationPolicyStatus     `json:"migrationPolicies,omitempty"`
 	DependencyGraph    DependencyGraphResult       `json:"dependencyGraph,omitempty"`
+	TopologicalDAG     TopologicalDAGResult        `json:"topologicalDAG,omitempty"`
+	// +listType=atomic
+	CorrelatedEvidence []CorrelatedEvidence        `json:"correlatedEvidence,omitempty"`
 	ObservedAt         metav1.Time                 `json:"observedAt,omitempty"`
 }
 

@@ -499,3 +499,97 @@ func EvaluatePlatformDependencyGraph(obs gitopsv1alpha1.PlatformObservationStatu
 	}
 }
 
+// EvaluateTopologicalDAG executes parent-child causal dependency traversal across:
+// MachineConfigPool -> MachineConfigDaemon -> virt-handler -> VMI Live Migration.
+// Halts evaluation of child nodes when a parent node fails.
+func EvaluateTopologicalDAG(obs gitopsv1alpha1.PlatformObservationStatus) gitopsv1alpha1.TopologicalDAGResult {
+	var nodes []gitopsv1alpha1.ResourceNodeStatus
+	var blockedReason string
+
+	// Node 1: MCP/worker
+	mcpState := "Healthy"
+	for _, mcp := range obs.MachineConfigPools {
+		if mcp.Phase == "Updating" || mcp.Phase == "Degraded" {
+			mcpState = mcp.Phase
+			break
+		}
+	}
+	nodes = append(nodes, gitopsv1alpha1.ResourceNodeStatus{
+		ID:    "mcp/worker",
+		Kind:  "MachineConfigPool",
+		Name:  "worker",
+		State: mcpState,
+	})
+
+	// Node 2: mcd/worker (Parent: mcp/worker)
+	mcdState := "Healthy"
+	mcdBlockedBy := ""
+	if mcpState != "Healthy" {
+		mcdState = "Blocked"
+		mcdBlockedBy = "mcp/worker"
+		if blockedReason == "" {
+			blockedReason = fmt.Sprintf("Parent mcp/worker is in state %s; blocking MachineConfigDaemon evaluation", mcpState)
+		}
+	}
+	nodes = append(nodes, gitopsv1alpha1.ResourceNodeStatus{
+		ID:        "mcd/worker",
+		Kind:      "Pod",
+		Namespace: "openshift-machine-config-operator",
+		Name:      "machine-config-daemon",
+		State:     mcdState,
+		ParentIDs: []string{"mcp/worker"},
+		BlockedBy: mcdBlockedBy,
+	})
+
+	// Node 3: daemonset/virt-handler (Parent: mcd/worker)
+	virtState := "Healthy"
+	virtBlockedBy := ""
+	if mcdState != "Healthy" {
+		virtState = "Blocked"
+		virtBlockedBy = "mcd/worker"
+		if blockedReason == "" {
+			blockedReason = "Parent mcd/worker is blocked; halting virt-handler evaluation"
+		}
+	} else if !obs.VirtHealth.VirtHandlerReady && obs.VirtHealth.HyperConvergedHealth != "" {
+		virtState = "Degraded"
+	}
+	nodes = append(nodes, gitopsv1alpha1.ResourceNodeStatus{
+		ID:        "daemonset/virt-handler",
+		Kind:      "DaemonSet",
+		Namespace: "openshift-cnv",
+		Name:      "virt-handler",
+		State:     virtState,
+		ParentIDs: []string{"mcd/worker"},
+		BlockedBy: virtBlockedBy,
+	})
+
+	// Node 4: vmim/active-migrations (Parent: daemonset/virt-handler)
+	vmimState := "Healthy"
+	vmimBlockedBy := ""
+	if virtState != "Healthy" {
+		vmimState = "Blocked"
+		vmimBlockedBy = "daemonset/virt-handler"
+		if blockedReason == "" {
+			blockedReason = "Parent virt-handler is unready/blocked; halting VMI migration evaluation"
+		}
+	} else if obs.VirtHealth.StalledMigrations > 0 {
+		vmimState = "Degraded"
+	}
+	nodes = append(nodes, gitopsv1alpha1.ResourceNodeStatus{
+		ID:        "vmim/active-migrations",
+		Kind:      "VirtualMachineInstanceMigration",
+		Name:      "active-migrations",
+		State:     vmimState,
+		ParentIDs: []string{"daemonset/virt-handler"},
+		BlockedBy: vmimBlockedBy,
+	})
+
+	return gitopsv1alpha1.TopologicalDAGResult{
+		Evaluated:     true,
+		Healthy:       blockedReason == "" && vmimState == "Healthy",
+		BlockedReason: blockedReason,
+		Nodes:         nodes,
+	}
+}
+
+
