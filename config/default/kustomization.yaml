@@ -5,12 +5,12 @@ kind: Kustomization
 namespace: gitops-fleet
 
 resources:
+- namespace.yaml
 - ../crd
 - ../rbac
 - ../manager
-- ../networkpolicy/allow_operator_egress.yaml
-- ../prometheus/servicemonitor.yaml
-- ../prometheus/alerts.yaml
+- ../networkpolicy
+- ../prometheus
 
 labels:
 - includeSelectors: true

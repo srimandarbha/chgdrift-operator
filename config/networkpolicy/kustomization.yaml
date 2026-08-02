@@ -1,0 +1,2 @@
+resources:
+- allow_operator_egress.yaml

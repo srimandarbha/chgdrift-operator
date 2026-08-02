@@ -19,11 +19,11 @@ This guide details how to test **`drift-operator`** locally against your OpenShi
                   │
                   ▼ (Injected into Operator)
  ┌──────────────────────────────────┐
- │    Local Go Operator Manager     │  <== Runs locally via `make run`
+ │    Local Go Operator Manager     │  <== Runs locally via `make run` or `go run main.go`
  │  - Reads gitops.chg.events       │      against local OpenShift KUBECONFIG
  │  - Creates ChangeWindow CR       │
  │  - Inspects local OpenShift apps │
- │  - Evaluates 6 Validation Gates  │
+ │  - Evaluates 8 Validation Gates  │
  │  - Emits report to Kafka         │
  └────────────────┬─────────────────┘
                   │
@@ -39,6 +39,7 @@ This guide details how to test **`drift-operator`** locally against your OpenShi
 
 Set environment variables on your terminal so `drift-operator` knows your local OpenShift `KUBECONFIG` and local Kafka broker endpoints:
 
+### Linux / macOS (Bash)
 ```bash
 # 1. Point to your local OpenShift lab cluster context
 export KUBECONFIG=~/.kube/config
@@ -54,18 +55,43 @@ export OPERATOR_NAMESPACE="gitops-fleet"
 export KAFKA_CA_FILE=""
 ```
 
+### Windows (PowerShell)
+```powershell
+# 1. Point to your local OpenShift lab cluster context
+$env:KUBECONFIG="$HOME\.kube\config"
+kubectl config set-context --current --namespace=gitops-fleet
+
+# 2. Configure Kafka Brokers & Topic Names
+$env:KAFKA_BROKERS="localhost:9092"
+$env:KAFKA_INGEST_TOPIC="gitops.chg.events"
+$env:KAFKA_EMIT_TOPIC="gitops.change.validation"
+$env:OPERATOR_NAMESPACE="gitops-fleet"
+
+# Optional: Disable TLS for local unencrypted testing
+$env:KAFKA_CA_FILE=""
+```
+
 ---
 
-## Step 2: Start the Go Operator Manager Locally (`make run`)
+## Step 2: Start the Go Operator Manager Locally
 
-1. Install CRDs into your local OpenShift lab cluster:
-   ```bash
-   make install
-   ```
-2. Start the operator manager locally:
-   ```bash
-   make run
-   ```
+### Linux / macOS (Bash)
+```bash
+# 1. Install CRDs into your local cluster
+make install
+
+# 2. Start the operator manager locally
+make run
+```
+
+### Windows (PowerShell / Command Prompt)
+```powershell
+# 1. Apply CRD manifests into your local cluster
+kubectl apply -k config/crd
+
+# 2. Run the Go operator binary directly
+go run main.go
+```
 
 You will see logs confirming Kafka bridge initialization:
 ```text
@@ -107,19 +133,7 @@ Create a local test payload file named `simulate_chg.json`:
 
 ## Step 4: Publish Simulated Event to `gitops.chg.events`
 
-Use one of the following methods to publish the payload:
-
-### Option A: Using `kcat` / `kafkacat`
-```bash
-kcat -b localhost:9092 -t gitops.chg.events -P simulate_chg.json
-```
-
-### Option B: Using Kafka Console Producer CLI
-```bash
-kafka-console-producer.sh --bootstrap-server localhost:9092 --topic gitops.chg.events < simulate_chg.json
-```
-
-### Option C: Using Python (`simulate_chg.py`)
+### Option A: Using Python (`simulate_chg.py`) (Cross-Platform / Windows & Linux)
 ```python
 import json
 from kafka import KafkaProducer
@@ -135,6 +149,21 @@ with open('simulate_chg.json') as f:
 producer.send('gitops.chg.events', payload)
 producer.flush()
 print("Simulated CHG event successfully published to gitops.chg.events!")
+```
+
+Run script:
+```powershell
+python simulate_chg.py
+```
+
+### Option B: Windows PowerShell via Docker Exec (If Kafka runs in Docker)
+```powershell
+Get-Content simulate_chg.json | docker exec -i kafka-container-name kafka-console-producer --bootstrap-server localhost:9092 --topic gitops.chg.events
+```
+
+### Option C: Linux / macOS / WSL (`kcat`)
+```bash
+kcat -b localhost:9092 -t gitops.chg.events -P simulate_chg.json
 ```
 
 ---
@@ -156,16 +185,36 @@ Once published, check your running operator logs or inspect OpenShift:
 
 ## Step 6: Listen for Emitted Validation Report on `gitops.change.validation`
 
-In a separate terminal, observe the validation report emitted by `drift-operator`:
+### Option A: Using Python (`consume_validation.py`) (Windows & Linux)
+```python
+import json
+from kafka import KafkaConsumer
 
-### Option A: Using `kcat`
-```bash
-kcat -b localhost:9092 -t gitops.change.validation -C -q
+consumer = KafkaConsumer(
+    'gitops.change.validation',
+    bootstrap_servers=['localhost:9092'],
+    auto_offset_reset='earliest',
+    value_deserializer=lambda m: json.loads(m.decode('utf-8'))
+)
+
+print("Listening for validation reports on gitops.change.validation...")
+for message in consumer:
+    print(json.dumps(message.value, indent=2))
 ```
 
-### Option B: Using Kafka Console Consumer CLI
+Run consumer:
+```powershell
+python consume_validation.py
+```
+
+### Option B: Windows PowerShell via Docker Exec
+```powershell
+docker exec -it kafka-container-name kafka-console-consumer --bootstrap-server localhost:9092 --topic gitops.change.validation --from-beginning
+```
+
+### Option C: Linux / macOS / WSL (`kcat`)
 ```bash
-kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic gitops.change.validation --from-beginning
+kcat -b localhost:9092 -t gitops.change.validation -C -q
 ```
 
 ### Expected Output Payload

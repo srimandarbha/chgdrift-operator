@@ -1,0 +1,3 @@
+resources:
+- servicemonitor.yaml
+- alerts.yaml

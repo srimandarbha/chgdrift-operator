@@ -1,0 +1,21 @@
+apiVersion: gitops.example.com/v1alpha1
+kind: ClusterAppReport
+metadata:
+  name: us-east-01-svc-payments
+  namespace: gitops-fleet
+  labels:
+    gitops.example.com/app: svc-payments
+spec:
+  clusterName: us-east-01
+  appName: svc-payments
+  observedRevision: a1b2c3d9
+  syncStatus: Synced
+  health: Healthy
+  observedAt: "2026-08-01T12:00:00Z"
+  mcpStatus:
+    name: virt
+    machineCount: 4
+    updatedNodeCount: 4
+    updatingNodeCount: 0
+    degradedNodeCount: 0
+    phase: Updated

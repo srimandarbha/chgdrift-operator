@@ -58,11 +58,12 @@ kubectl apply -k config/manager/
 
 ---
 
-## Method 2: Rapid Local Execution (`make run`)
+## Method 2: Rapid Local Execution (`make run` or `go run main.go`)
 
 If you want to run the Go binary directly on your laptop without building containers:
 
-```cmd
+### Linux / macOS (Bash)
+```bash
 # 1. Ensure KUBECONFIG points to Docker Desktop
 kubectl config use-context docker-desktop
 
@@ -71,6 +72,18 @@ make install
 
 # 3. Run operator binary locally on your laptop
 make run
+```
+
+### Windows (PowerShell / Command Prompt)
+```powershell
+# 1. Ensure KUBECONFIG points to Docker Desktop
+kubectl config use-context docker-desktop
+
+# 2. Install CRDs into Docker Desktop
+kubectl apply -k config/crd
+
+# 3. Run operator binary locally on your laptop
+go run main.go
 ```
 
 ---

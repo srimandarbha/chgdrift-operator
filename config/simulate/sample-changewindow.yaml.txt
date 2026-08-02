@@ -1,0 +1,15 @@
+apiVersion: gitops.example.com/v1alpha1
+kind: ChangeWindow
+metadata:
+  name: chg0012345
+  namespace: gitops-fleet
+spec:
+  chgNumber: CHG0012345
+  releaseTag: v2.4.0
+  expectedRevision: a1b2c3d9
+  rootApp: platform-root
+  impactedApps:
+    - svc-payments
+  startTime: "2026-08-01T10:00:00Z"
+  endTime: "2026-08-01T14:00:00Z"
+  staleReportThresholdSeconds: 300

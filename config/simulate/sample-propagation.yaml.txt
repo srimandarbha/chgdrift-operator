@@ -1,0 +1,11 @@
+apiVersion: gitops.example.com/v1alpha1
+kind: PropagationStatus
+metadata:
+  name: svc-payments
+  namespace: gitops-fleet
+spec:
+  appName: svc-payments
+  expectedRevision: a1b2c3d9
+  targetClusters:
+    - us-east-01
+    - us-east-02
