@@ -133,7 +133,13 @@ Create a local test payload file named `simulate_chg.json`:
 
 ## Step 4: Publish Simulated Event to `gitops.chg.events`
 
-### Option A: Using Python (`simulate_chg.py`) (Cross-Platform / Windows & Linux)
+### Python Prerequisites (Python 3.12+)
+> **Note for Python 3.12+**: Install `kafka-python-ng` (the maintained fork) to avoid `ModuleNotFoundError: No module named 'kafka.vendor.six.moves'` with legacy `kafka-python`:
+```powershell
+pip install kafka-python-ng
+```
+
+### Option A: Using Python (`config/simulate/simulate.py`) (Cross-Platform / Windows & Linux)
 ```python
 import json
 from kafka import KafkaProducer
@@ -151,9 +157,9 @@ producer.flush()
 print("Simulated CHG event successfully published to gitops.chg.events!")
 ```
 
-Run script:
+Run simulation script:
 ```powershell
-python simulate_chg.py
+python config/simulate/simulate.py
 ```
 
 ### Option B: Windows PowerShell via Docker Exec (If Kafka runs in Docker)
@@ -204,7 +210,7 @@ for message in consumer:
 
 Run consumer:
 ```powershell
-python consume_validation.py
+python config/simulate/consume_validation.py
 ```
 
 ### Option B: Windows PowerShell via Docker Exec
