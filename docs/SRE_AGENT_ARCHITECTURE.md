@@ -1,4 +1,4 @@
-# Standalone External SRE Agent & Spoke Operator Architecture
+# Standalone External SRE Agent & Autonomous Peer Operator Architecture
 
 This document provides a complete guide for developing the **Standalone SRE Agent** and **Autonomous Federated Peer-to-Peer `drift-operator`**, detailing system topology, Git branch/PR extraction logic (`main`, `sit`, release tags), blast radius derivation (applications, namespaces, clusters), JSON payload planning, and autonomous cluster validation reporting over Kafka.
 
@@ -34,7 +34,7 @@ This document provides a complete guide for developing the **Standalone SRE Agen
    │ CLUSTER 1 (Autonomous Peer)    ││ CLUSTER 2 (Autonomous Peer)    ││ CLUSTER N (Autonomous Peer)    │
    │ [ drift-operator ] (Go)        ││ [ drift-operator ] (Go)        ││ [ drift-operator ] (Go)        │
    │  - Self-filters $CLUSTER_NAME  ││  - Self-filters $CLUSTER_NAME  ││  - Self-filters $CLUSTER_NAME  │
-   │  - Evaluates local 8 gates     ││  - Evaluates local 8 gates     ││  - Evaluates local 8 gates     │
+   │  - Evaluates 11 safety gates   ││  - Evaluates 11 safety gates   ││  - Evaluates 11 safety gates   │
    │  - Publishes validation report ││  - Publishes validation report ││  - Publishes validation report │
    └────────────────────────────────┘└────────────────────────────────┘└────────────────────────────────┘
 ```

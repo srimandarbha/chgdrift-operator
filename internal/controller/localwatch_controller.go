@@ -26,7 +26,7 @@ import (
 
 const (
 	// reportNamespace is the namespace where ClusterAppReports are written.
-	// In a spoke deployment this is typically the operator's own namespace.
+	// In an autonomous peer deployment this is typically the operator's own namespace.
 	reportNamespace = "gitops-fleet"
 
 	// maxWarningEvents is the maximum number of de-duplicated Warning events
@@ -37,10 +37,10 @@ const (
 	maxTailLines int64 = 50
 )
 
-// LocalAppWatchReconciler runs on a spoke cluster. It watches bare ConfigMaps
-// that act as simple app descriptors (one per app), collects local observability
-// data, and writes a ClusterAppReport that the hub's PropagationStatusReconciler
-// reads.
+// LocalAppWatchReconciler runs on an autonomous peer cluster. It watches bare ConfigMaps
+// that act as simple app descriptors (one per app), collects local platform telemetry and
+// workload observability data, and writes a ClusterAppReport that the local or aggregated
+// validation pipeline reads.
 //
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
@@ -133,11 +133,23 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	clusterOps := r.readClusterOperators(ctx)
 
+	// Platform-first dependency graph: read all platform resources
+	allMCPs := r.readAllMachineConfigPools(ctx)
+	if len(allMCPs) == 0 {
+		allMCPs = []gitopsv1alpha1.MachineConfigPoolStatus{spec.MCPStatus}
+	}
+
 	spec.PlatformObservation = gitopsv1alpha1.PlatformObservationStatus{
 		ClusterOperators:   clusterOps,
-		MachineConfigPools: []gitopsv1alpha1.MachineConfigPoolStatus{spec.MCPStatus},
+		MachineConfigPools: allMCPs,
 		VirtHealth:         virtHealth,
 		VirtWorkloads:      virtWorkloads,
+		ClusterVersion:     r.readClusterVersion(ctx),
+		KubeVirt:           r.readKubeVirtStatus(ctx),
+		CDI:                r.readCDIStatus(ctx),
+		SSP:                r.readSSPStatus(ctx),
+		NodeMaintenance:    r.readNodeMaintenanceStatus(ctx),
+		MigrationPolicies:  r.readMigrationPolicies(ctx),
 		ObservedAt:         metav1.Now(),
 	}
 

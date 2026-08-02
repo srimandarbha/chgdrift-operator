@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -131,6 +133,11 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	previousPhase := chg.Status.Phase
 	var requeueAfter time.Duration
+
+	// Capture baseline snapshot at window start for evidence model if not already set
+	if chg.Status.Baseline == nil {
+		chg.Status.Baseline = r.captureBaseline(&chg, now)
+	}
 
 	switch {
 	case validationRes.Passed:
@@ -275,6 +282,30 @@ func (r *ChangeWindowReconciler) evaluateGates(ctx context.Context, chg *gitopsv
 		Status:     gitopsv1alpha1.GateStatusTrue,
 		Reason:     "VirtualizationPlatformHealthy",
 		Message:    "HyperConverged healthy and no stalled migrations",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	gateClusterVersion := gitopsv1alpha1.GateResult{
+		Name:       "ClusterVersionStable",
+		Status:     gitopsv1alpha1.GateStatusUnknown,
+		Reason:     "ClusterVersionNotReported",
+		Message:    "ClusterVersion telemetry was not observed",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	gatePlatformOps := gitopsv1alpha1.GateResult{
+		Name:       "PlatformOperatorsDeployed",
+		Status:     gitopsv1alpha1.GateStatusUnknown,
+		Reason:     "PlatformOperatorsNotReported",
+		Message:    "KubeVirt/CDI/SSP operator telemetry was not observed",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	gateNodeMaint := gitopsv1alpha1.GateResult{
+		Name:       "NoActiveNodeMaintenance",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "NoMaintenanceNodes",
+		Message:    "No active NodeMaintenance objects detected",
 		ObservedAt: metav1.NewTime(now),
 	}
 
@@ -424,6 +455,62 @@ func (r *ChangeWindowReconciler) evaluateGates(ctx context.Context, chg *gitopsv
 				gateVirt.Message = fmt.Sprintf("%d unmigratable VMIs observed on target nodes", virt.UnmigratableVMIs)
 				issues = append(issues, fmt.Sprintf("%s/%s: %d unmigratable VMIs", appName, cs.ClusterName, virt.UnmigratableVMIs))
 			}
+
+			// Evaluate ClusterVersion gate from PlatformObservation
+			cv := cs.PlatformObservation.ClusterVersion
+			if cv.Version != "" || cv.DesiredVersion != "" {
+				if cv.Progressing {
+					gateClusterVersion.Status = gitopsv1alpha1.GateStatusFalse
+					gateClusterVersion.Reason = "ClusterVersionProgressing"
+					gateClusterVersion.Message = fmt.Sprintf("ClusterVersion is upgrading from %s to %s", cv.Version, cv.DesiredVersion)
+					issues = append(issues, fmt.Sprintf("%s/%s: ClusterVersion upgrading", appName, cs.ClusterName))
+				} else if cv.Available {
+					gateClusterVersion.Status = gitopsv1alpha1.GateStatusTrue
+					gateClusterVersion.Reason = "ClusterVersionStable"
+					gateClusterVersion.Message = fmt.Sprintf("ClusterVersion %s is stable and available", cv.Version)
+				} else {
+					gateClusterVersion.Status = gitopsv1alpha1.GateStatusFalse
+					gateClusterVersion.Reason = "ClusterVersionNotAvailable"
+					gateClusterVersion.Message = "ClusterVersion is not Available"
+					issues = append(issues, fmt.Sprintf("%s/%s: ClusterVersion not available", appName, cs.ClusterName))
+				}
+			}
+
+			// Evaluate PlatformOperatorsDeployed gate
+			kv := cs.PlatformObservation.KubeVirt
+			cdi := cs.PlatformObservation.CDI
+			ssp := cs.PlatformObservation.SSP
+			if kv.Phase != "" && kv.Phase != "Unknown" {
+				if kv.Ready && cdi.Ready && ssp.Ready {
+					gatePlatformOps.Status = gitopsv1alpha1.GateStatusTrue
+					gatePlatformOps.Reason = "AllPlatformOperatorsDeployed"
+					gatePlatformOps.Message = "KubeVirt, CDI, and SSP operators are all Deployed"
+				} else {
+					gatePlatformOps.Status = gitopsv1alpha1.GateStatusFalse
+					var notReady []string
+					if !kv.Ready {
+						notReady = append(notReady, fmt.Sprintf("KubeVirt(%s)", kv.Phase))
+					}
+					if !cdi.Ready {
+						notReady = append(notReady, fmt.Sprintf("CDI(%s)", cdi.Phase))
+					}
+					if !ssp.Ready {
+						notReady = append(notReady, fmt.Sprintf("SSP(%s)", ssp.Phase))
+					}
+					gatePlatformOps.Reason = "PlatformOperatorNotDeployed"
+					gatePlatformOps.Message = fmt.Sprintf("Platform operators not deployed: %s", strings.Join(notReady, ", "))
+					issues = append(issues, fmt.Sprintf("%s/%s: platform operators not deployed: %s", appName, cs.ClusterName, strings.Join(notReady, ", ")))
+				}
+			}
+
+			// Evaluate NoActiveNodeMaintenance gate
+			nm := cs.PlatformObservation.NodeMaintenance
+			if nm.ActiveMaintenanceNodes > 0 {
+				gateNodeMaint.Status = gitopsv1alpha1.GateStatusFalse
+				gateNodeMaint.Reason = "ActiveNodeMaintenance"
+				gateNodeMaint.Message = fmt.Sprintf("%d nodes under active maintenance", nm.ActiveMaintenanceNodes)
+				issues = append(issues, fmt.Sprintf("%s/%s: %d nodes under maintenance", appName, cs.ClusterName, nm.ActiveMaintenanceNodes))
+			}
 		}
 	}
 
@@ -481,12 +568,18 @@ func (r *ChangeWindowReconciler) evaluateGates(ctx context.Context, chg *gitopsv
 	preserveObservedAt(&gateObjects)
 	preserveObservedAt(&gateDeps)
 	preserveObservedAt(&gateVirt)
+	preserveObservedAt(&gateClusterVersion)
+	preserveObservedAt(&gatePlatformOps)
+	preserveObservedAt(&gateNodeMaint)
 
 	gateResults := []gitopsv1alpha1.GateResult{
+		gateClusterVersion,
 		gateClusterOps,
+		gatePlatformOps,
+		gateMCP,
+		gateNodeMaint,
 		gateAllChanges,
 		gateHealth,
-		gateMCP,
 		gateEvents,
 		gateObjects,
 		gateDeps,
@@ -613,6 +706,7 @@ func (r *ChangeWindowReconciler) BuildKafkaReportJSON(chg *gitopsv1alpha1.Change
 		"silentClusters": chg.Status.SilentClusters,
 		"actionsApplied": chg.Status.Actions,
 		"validation":     chg.Status.Validation,
+		"baseline":       chg.Status.Baseline,
 	}
 	return json.MarshalIndent(reportMap, "", "  ")
 }
@@ -661,4 +755,60 @@ func (r *ChangeWindowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *ChangeWindowReconciler) isHubCluster(ctx context.Context) bool {
 	return DetectClusterRole(ctx, r.Client)
+}
+
+// captureBaseline extracts a snapshot of platform state at the start of a maintenance window.
+// This baseline enables Baseline → Observed → Evidence → Decision reasoning.
+func (r *ChangeWindowReconciler) captureBaseline(chg *gitopsv1alpha1.ChangeWindow, now time.Time) *gitopsv1alpha1.BaselineSnapshot {
+	baseline := &gitopsv1alpha1.BaselineSnapshot{
+		CapturedAt: metav1.NewTime(now),
+	}
+
+	// Extract baseline from the first available cluster state's PlatformObservation
+	for _, appStateMap := range chg.Status.AppStates {
+		for _, cs := range appStateMap.ClusterStates {
+			po := cs.PlatformObservation
+			if po.ClusterVersion.Version != "" {
+				baseline.ClusterVersion = po.ClusterVersion.Version
+			}
+			if po.KubeVirt.ObservedVersion != "" {
+				baseline.KubeVirtVersion = po.KubeVirt.ObservedVersion
+			}
+			if po.CDI.ObservedVersion != "" {
+				baseline.CDIVersion = po.CDI.ObservedVersion
+			}
+			if po.SSP.ObservedVersion != "" {
+				baseline.SSPVersion = po.SSP.ObservedVersion
+			}
+
+			// Compute a digest of ClusterOperator states for drift detection
+			if len(po.ClusterOperators) > 0 {
+				var coNames []string
+				for _, co := range po.ClusterOperators {
+					coNames = append(coNames, fmt.Sprintf("%s=%s/%v/%v", co.Name, co.Version, co.Available, co.Degraded))
+				}
+				sort.Strings(coNames)
+				digest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(coNames, ","))))
+				baseline.ClusterOperatorDigest = digest[:16] // truncated for readability
+			}
+
+			// Compute MCP hash
+			if len(po.MachineConfigPools) > 0 {
+				var mcpStates []string
+				for _, mcp := range po.MachineConfigPools {
+					mcpStates = append(mcpStates, fmt.Sprintf("%s=%s/%s", mcp.Name, mcp.Phase, mcp.CurrentRenderedConfig))
+				}
+				sort.Strings(mcpStates)
+				digest := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(mcpStates, ","))))
+				baseline.MachineConfigPoolHash = digest[:16]
+			}
+
+			// Take baseline from first cluster with data
+			if baseline.ClusterVersion != "" || baseline.KubeVirtVersion != "" {
+				return baseline
+			}
+		}
+	}
+
+	return baseline
 }

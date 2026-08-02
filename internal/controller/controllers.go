@@ -18,8 +18,9 @@ type Controller interface {
 // SetupAllControllers registers all current and future controllers with the manager.
 // kafkaBridge may be nil when Kafka is disabled; all controllers handle a nil bridge safely.
 func SetupAllControllers(mgr ctrl.Manager, kafkaBridge *kafka.KafkaBridge) error {
-	// Spoke mode: CLUSTER_NAME env var enables the LocalAppWatchReconciler, which
-	// writes ClusterAppReports from local ArgoCD/workload state.
+	// Autonomous peer mode (recommended): CLUSTER_NAME env var enables the
+	// LocalAppWatchReconciler, which writes ClusterAppReports from local platform
+	// and workload state. Each cluster operates independently.
 	clusterName := os.Getenv("CLUSTER_NAME")
 
 	type reg struct {
@@ -34,7 +35,7 @@ func SetupAllControllers(mgr ctrl.Manager, kafkaBridge *kafka.KafkaBridge) error
 			return fmt.Errorf("unable to create typed kubernetes clientset for spoke reconciler: %w", err)
 		}
 
-		// Spoke deployment mode: run ONLY the spoke-side telemetry controller.
+		// Autonomous peer deployment mode: run local platform telemetry controller.
 		controllers = []reg{
 			{
 				name: "LocalAppWatch",
@@ -46,7 +47,8 @@ func SetupAllControllers(mgr ctrl.Manager, kafkaBridge *kafka.KafkaBridge) error
 			},
 		}
 	} else {
-		// Hub deployment mode: run fleet aggregation and change window controllers.
+		// Fleet aggregation mode (optional): run aggregation and change window controllers.
+		// In the peer-to-peer model, this path is used for optional central fleet visibility.
 		controllers = []reg{
 			{
 				name: "PropagationStatus",

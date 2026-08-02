@@ -134,7 +134,81 @@ type PlatformObservationStatus struct {
 	MachineConfigPools []MachineConfigPoolStatus    `json:"machineConfigPools,omitempty"`
 	VirtHealth         VirtualizationImpactStatus  `json:"virtHealth,omitempty"`
 	VirtWorkloads      VirtualizationWorkloadSummary `json:"virtWorkloads,omitempty"`
+	ClusterVersion     ClusterVersionStatus        `json:"clusterVersion,omitempty"`
+	KubeVirt           KubeVirtOperatorStatus      `json:"kubeVirt,omitempty"`
+	CDI                CDIOperatorStatus           `json:"cdi,omitempty"`
+	SSP                SSPOperatorStatus           `json:"ssp,omitempty"`
+	NodeMaintenance    NodeMaintenanceStatus       `json:"nodeMaintenance,omitempty"`
+	// +listType=atomic
+	MigrationPolicies  []MigrationPolicyStatus     `json:"migrationPolicies,omitempty"`
 	ObservedAt         metav1.Time                 `json:"observedAt,omitempty"`
+}
+
+// ClusterVersionStatus captures OpenShift ClusterVersion upgrade state.
+type ClusterVersionStatus struct {
+	// Version is the currently applied OCP version.
+	Version string `json:"version,omitempty"`
+	// DesiredVersion is the target version the cluster is upgrading to.
+	DesiredVersion string `json:"desiredVersion,omitempty"`
+	// Progressing is true when the cluster is actively upgrading.
+	Progressing bool `json:"progressing,omitempty"`
+	// Available is true when the cluster reports Available=True.
+	Available bool `json:"available,omitempty"`
+	// Channel is the update channel (e.g. stable-4.14).
+	Channel string `json:"channel,omitempty"`
+}
+
+// KubeVirtOperatorStatus captures KubeVirt operator deployment health.
+type KubeVirtOperatorStatus struct {
+	// Phase is Deployed | Deploying | Deleting | "".
+	Phase string `json:"phase,omitempty"`
+	// TargetVersion is the desired KubeVirt version.
+	TargetVersion string `json:"targetVersion,omitempty"`
+	// ObservedVersion is the currently running version.
+	ObservedVersion string `json:"observedVersion,omitempty"`
+	// Ready is true when phase is Deployed and versions match.
+	Ready bool `json:"ready,omitempty"`
+}
+
+// CDIOperatorStatus captures CDI operator deployment health.
+type CDIOperatorStatus struct {
+	Phase           string `json:"phase,omitempty"`
+	TargetVersion   string `json:"targetVersion,omitempty"`
+	ObservedVersion string `json:"observedVersion,omitempty"`
+	Ready           bool   `json:"ready,omitempty"`
+}
+
+// SSPOperatorStatus captures SSP operator deployment health.
+type SSPOperatorStatus struct {
+	Phase           string `json:"phase,omitempty"`
+	TargetVersion   string `json:"targetVersion,omitempty"`
+	ObservedVersion string `json:"observedVersion,omitempty"`
+	Ready           bool   `json:"ready,omitempty"`
+}
+
+// NodeMaintenanceStatus captures active NodeMaintenance objects.
+type NodeMaintenanceStatus struct {
+	ActiveMaintenanceNodes int32 `json:"activeMaintenanceNodes,omitempty"`
+	// +listType=atomic
+	MaintenanceNodeNames []string `json:"maintenanceNodeNames,omitempty"`
+}
+
+// MigrationPolicyStatus captures KubeVirt MigrationPolicy configuration.
+type MigrationPolicyStatus struct {
+	Name                  string `json:"name,omitempty"`
+	BandwidthPerMigration string `json:"bandwidthPerMigration,omitempty"`
+	AllowAutoConverge     bool   `json:"allowAutoConverge,omitempty"`
+}
+
+// BaselineSnapshot captures platform state at the start of a maintenance window.
+type BaselineSnapshot struct {
+	CapturedAt            metav1.Time `json:"capturedAt"`
+	ClusterVersion        string      `json:"clusterVersion,omitempty"`
+	MachineConfigPoolHash string      `json:"machineConfigPoolHash,omitempty"`
+	KubeVirtVersion       string      `json:"kubeVirtVersion,omitempty"`
+	CDIVersion            string      `json:"cdiVersion,omitempty"`
+	SSPVersion            string      `json:"sspVersion,omitempty"`
+	ClusterOperatorDigest string      `json:"clusterOperatorDigest,omitempty"`
 }
 
 // ----------------------------------------------------------------------------
@@ -234,7 +308,7 @@ type PropagationStatusSpec struct {
 }
 
 // ClusterRevisionState represents the aggregated state for one cluster within a PropagationStatus.
-// The hub-side aggregator copies observable fields from ClusterAppReport so that
+// The peer-side aggregator or fleet aggregator copies observable fields from ClusterAppReport so that
 // ChangeWindowReconciler has a single place to read all per-cluster data.
 type ClusterRevisionState struct {
 	ClusterName            string                     `json:"clusterName"`
@@ -392,6 +466,7 @@ type ChangeWindowStatus struct {
 	StabilizationStartedAt *metav1.Time                  `json:"stabilizationStartedAt,omitempty"`
 	LastReportedAt         metav1.Time                   `json:"lastReportedAt,omitempty"`
 	AppStates              map[string]AppClusterStateMap `json:"appStates,omitempty"`
+	Baseline               *BaselineSnapshot             `json:"baseline,omitempty"`
 }
 
 type AppClusterStateMap struct {
