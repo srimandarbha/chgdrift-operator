@@ -76,7 +76,7 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{}, fmt.Errorf("failed to get ConfigMap %s: %w", req.NamespacedName, err)
 	}
 
 	if cm.DeletionTimestamp != nil && !cm.DeletionTimestamp.IsZero() {
@@ -112,10 +112,23 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		spec.Dependencies = r.checkDependencies(ctx, desc.Namespace, &cm)
 	}
 
+	// Determine target namespaces for virtualization check
+	var targetNSList []string
+	if rawNS := cm.Annotations["gitops.example.com/target-namespaces"]; rawNS != "" {
+		for _, ns := range strings.Split(rawNS, ",") {
+			if ns = strings.TrimSpace(ns); ns != "" {
+				targetNSList = append(targetNSList, ns)
+			}
+		}
+	}
+	if len(targetNSList) == 0 && desc.Namespace != "" {
+		targetNSList = []string{desc.Namespace}
+	}
+
 	// MCP, Virt, ClusterOperators, and PlatformObservation status are collected on each reconcile.
 	mcpPool := cm.Labels["gitops.example.com/mcp-pool"]
 	spec.MCPStatus = r.readMachineConfigPool(ctx, mcpPool)
-	virtHealth, virtWorkloads := r.readVirtualizationStatus(ctx, desc.Namespace)
+	virtHealth, virtWorkloads := r.readVirtualizationStatus(ctx, targetNSList)
 	spec.VirtStatus = virtHealth
 
 	clusterOps := r.readClusterOperators(ctx)
@@ -132,7 +145,7 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
 		}
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{}, fmt.Errorf("failed to upsert report %s: %w", reportName, err)
 	}
 
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -492,7 +505,7 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, pre
 	}
 }
 
-func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, appNamespace string) (gitopsv1alpha1.VirtualizationImpactStatus, gitopsv1alpha1.VirtualizationWorkloadSummary) {
+func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, targetNSList []string) (gitopsv1alpha1.VirtualizationImpactStatus, gitopsv1alpha1.VirtualizationWorkloadSummary) {
 	health := gitopsv1alpha1.VirtualizationImpactStatus{
 		HyperConvergedHealth: "Healthy",
 		VirtHandlerReady:     true,
@@ -550,79 +563,87 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 		}
 	}
 
-	// 3. Query VirtualMachineInstanceMigration CRs to count active and stalled migrations
-	var vmimList unstructured.UnstructuredList
-	vmimList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "kubevirt.io",
-		Version: "v1",
-		Kind:    "VirtualMachineInstanceMigration",
-	})
-	targetNS := appNamespace
-	if targetNS == "" {
-		targetNS = "default"
+	if len(targetNSList) == 0 {
+		targetNSList = []string{"default"}
 	}
-	if err := r.List(ctx, &vmimList, client.InNamespace(targetNS), client.Limit(100)); err == nil {
-		for _, vmim := range vmimList.Items {
-			phase, _, _ := unstructured.NestedString(vmim.Object, "status", "phase")
-			switch phase {
-			case "Scheduling", "Scheduled", "PreparingTarget", "TargetReady", "Running":
-				health.ActiveMigrations++
-				workloads.ActiveMigrations++
-			case "Failed":
-				health.StalledMigrations++
-				workloads.StalledMigrations++
-			}
-			conditions, found, _ := unstructured.NestedSlice(vmim.Object, "status", "conditions")
-			if found {
-				for _, condRaw := range conditions {
-					cond, ok := condRaw.(map[string]interface{})
-					if !ok {
-						continue
+
+	for _, targetNS := range targetNSList {
+		if targetNS == "" {
+			continue
+		}
+
+		// 3. Query VirtualMachineInstanceMigration CRs to count active and stalled migrations
+		var vmimList unstructured.UnstructuredList
+		vmimList.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "kubevirt.io",
+			Version: "v1",
+			Kind:    "VirtualMachineInstanceMigration",
+		})
+		if err := r.List(ctx, &vmimList, client.InNamespace(targetNS), client.Limit(100)); err == nil {
+			for _, vmim := range vmimList.Items {
+				phase, _, _ := unstructured.NestedString(vmim.Object, "status", "phase")
+				switch phase {
+				case "Scheduling", "Scheduled", "PreparingTarget", "TargetReady", "Running":
+					health.ActiveMigrations++
+					workloads.ActiveMigrations++
+				}
+
+				isStalled := false
+				conditions, found, _ := unstructured.NestedSlice(vmim.Object, "status", "conditions")
+				if found {
+					for _, condRaw := range conditions {
+						cond, ok := condRaw.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						cType, _ := cond["type"].(string)
+						cStatus, _ := cond["status"].(string)
+						if cType == "Stalled" && cStatus == "True" {
+							isStalled = true
+						}
 					}
-					cType, _ := cond["type"].(string)
-					cStatus, _ := cond["status"].(string)
-					if cType == "Stalled" && cStatus == "True" {
-						health.StalledMigrations++
-						workloads.StalledMigrations++
-					}
+				}
+				if isStalled {
+					health.StalledMigrations++
+					workloads.StalledMigrations++
 				}
 			}
 		}
-	}
 
-	// 4. Query VirtualMachineInstance CRs to count unmigratable VMIs
-	var vmiList unstructured.UnstructuredList
-	vmiList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "kubevirt.io",
-		Version: "v1",
-		Kind:    "VirtualMachineInstance",
-	})
-	if err := r.List(ctx, &vmiList, client.InNamespace(targetNS), client.Limit(100)); err == nil {
-		workloads.TotalVMIs = int32(len(vmiList.Items))
-		for _, vmi := range vmiList.Items {
-			phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
-			if phase == "Running" {
-				workloads.RunningVMIs++
-			}
-			isLiveMigratable := true
-			conditions, found, _ := unstructured.NestedSlice(vmi.Object, "status", "conditions")
-			if found {
-				for _, condRaw := range conditions {
-					cond, ok := condRaw.(map[string]interface{})
-					if !ok {
-						continue
-					}
-					cType, _ := cond["type"].(string)
-					cStatus, _ := cond["status"].(string)
-					if cType == "LiveMigratable" && cStatus == "False" {
-						isLiveMigratable = false
-						health.UnmigratableVMIs++
-						workloads.UnmigratableVMIs++
+		// 4. Query VirtualMachineInstance CRs to count unmigratable VMIs
+		var vmiList unstructured.UnstructuredList
+		vmiList.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "kubevirt.io",
+			Version: "v1",
+			Kind:    "VirtualMachineInstance",
+		})
+		if err := r.List(ctx, &vmiList, client.InNamespace(targetNS), client.Limit(100)); err == nil {
+			workloads.TotalVMIs += int32(len(vmiList.Items))
+			for _, vmi := range vmiList.Items {
+				phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
+				if phase == "Running" {
+					workloads.RunningVMIs++
+				}
+				isLiveMigratable := true
+				conditions, found, _ := unstructured.NestedSlice(vmi.Object, "status", "conditions")
+				if found {
+					for _, condRaw := range conditions {
+						cond, ok := condRaw.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						cType, _ := cond["type"].(string)
+						cStatus, _ := cond["status"].(string)
+						if cType == "LiveMigratable" && cStatus == "False" {
+							isLiveMigratable = false
+							health.UnmigratableVMIs++
+							workloads.UnmigratableVMIs++
+						}
 					}
 				}
-			}
-			if isLiveMigratable {
-				workloads.LiveMigratableVMIs++
+				if isLiveMigratable {
+					workloads.LiveMigratableVMIs++
+				}
 			}
 		}
 	}

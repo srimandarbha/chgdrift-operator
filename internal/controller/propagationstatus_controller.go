@@ -56,7 +56,7 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{}, nil
 		}
 		// Rule 2: Transient error - manage backoff explicitly
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{}, fmt.Errorf("failed to get PropagationStatus %s: %w", req.NamespacedName, err)
 	}
 
 	// Rule 3: Deletion check
@@ -83,7 +83,7 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		client.MatchingFields{"spec.appName": ps.Spec.AppName},
 		client.Limit(100),
 	); err != nil {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{}, fmt.Errorf("failed to list ClusterAppReports for app %s: %w", ps.Spec.AppName, err)
 	}
 
 	byCluster := make(map[string]gitopsv1alpha1.ClusterAppReport, len(reports.Items))
@@ -191,7 +191,7 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 				// Rule 2: Conflict error - retry immediately
 				return ctrl.Result{Requeue: true}, nil
 			}
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return ctrl.Result{}, fmt.Errorf("failed to patch PropagationStatus status %s: %w", req.NamespacedName, err)
 		}
 	}
 

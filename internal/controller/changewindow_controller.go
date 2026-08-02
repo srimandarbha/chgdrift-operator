@@ -43,8 +43,8 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			// Rule 2: NotFound - return empty Result without error
 			return ctrl.Result{}, nil
 		}
-		// Rule 2: Transient error - retry with explicit backoff
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		// Rule 2: Transient error - propagate error for exponential backoff & metrics
+		return ctrl.Result{}, fmt.Errorf("failed to get ChangeWindow %s: %w", req.NamespacedName, err)
 	}
 
 	// Rule 3: Deletion Check
@@ -95,7 +95,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				logger.Info("PropagationStatus not found for impacted app", "appName", appName)
 				continue
 			}
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return ctrl.Result{}, fmt.Errorf("failed to get PropagationStatus %s: %w", psName, err)
 		}
 
 		chg.Status.AppStates[appName] = gitopsv1alpha1.AppClusterStateMap{
@@ -204,7 +204,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				// Rule 2: Conflict retry
 				return ctrl.Result{Requeue: true}, nil
 			}
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return ctrl.Result{}, fmt.Errorf("failed to patch ChangeWindow status %s: %w", req.NamespacedName, err)
 		}
 	}
 
