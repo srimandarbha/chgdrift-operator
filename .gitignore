@@ -1,0 +1,6 @@
+# Binaries & Built Artifacts
+bin/
+*.exe
+
+# Local scratch files & logs
+*.log
