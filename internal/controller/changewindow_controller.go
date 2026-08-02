@@ -704,7 +704,7 @@ func (r *ChangeWindowReconciler) runParkedHardRefreshAction(chg *gitopsv1alpha1.
 }
 
 func (r *ChangeWindowReconciler) BuildKafkaReportJSON(chg *gitopsv1alpha1.ChangeWindow, now time.Time) ([]byte, error) {
-	reportMap := map[string]interface{}{
+	dataMap := map[string]interface{}{
 		"chgNumber":         chg.Spec.CHGNumber,
 		"releaseTag":        chg.Spec.ReleaseTag,
 		"expectedRevision":  chg.Spec.ExpectedRevision,
@@ -720,8 +720,20 @@ func (r *ChangeWindowReconciler) BuildKafkaReportJSON(chg *gitopsv1alpha1.Change
 		"actionsApplied": chg.Status.Actions,
 		"validation":     chg.Status.Validation,
 		"baseline":       chg.Status.Baseline,
+		"timeline":       chg.Status.Timeline,
 	}
-	return json.MarshalIndent(reportMap, "", "  ")
+
+	cloudEventMap := map[string]interface{}{
+		"specversion":     "1.0",
+		"id":              fmt.Sprintf("%s-%d", chg.Spec.CHGNumber, now.Unix()),
+		"type":            "com.example.drift.validation.report",
+		"source":          fmt.Sprintf("/chgdrift-operator/%s", chg.Spec.CHGNumber),
+		"time":            now.Format(time.RFC3339),
+		"datacontenttype": "application/json",
+		"data":            dataMap,
+	}
+
+	return json.MarshalIndent(cloudEventMap, "", "  ")
 }
 
 func (r *ChangeWindowReconciler) mapPropagationStatusToChangeWindow(ctx context.Context, obj client.Object) []ctrl.Request {

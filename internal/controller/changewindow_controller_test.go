@@ -408,9 +408,18 @@ func TestBuildKafkaReportJSON_IncludesBaseline(t *testing.T) {
 		t.Fatalf("invalid JSON generated: %v", err)
 	}
 
-	baseline, ok := parsed["baseline"].(map[string]interface{})
+	if parsed["specversion"] != "1.0" || parsed["type"] != "com.example.drift.validation.report" {
+		t.Errorf("expected CloudEvents specversion 1.0, got specversion=%v type=%v", parsed["specversion"], parsed["type"])
+	}
+
+	dataMap, ok := parsed["data"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected baseline object in report JSON")
+		t.Fatalf("expected data object in CloudEvent JSON")
+	}
+
+	baseline, ok := dataMap["baseline"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected baseline object in CloudEvent data")
 	}
 	if baseline["clusterVersion"] != "4.14.1" {
 		t.Errorf("expected clusterVersion 4.14.1 in baseline, got %v", baseline["clusterVersion"])
