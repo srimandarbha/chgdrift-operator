@@ -59,6 +59,11 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if now.Before(chg.Spec.StartTime.Time) {
 		waitDuration := chg.Spec.StartTime.Time.Sub(now)
 		logger.Info("CHG maintenance window pending start", "chg", chg.Spec.CHGNumber, "startsIn", waitDuration.String())
+		chg.Status.Phase = "Pending"
+		chg.Status.OverallStatus = "Pending"
+		if !reflect.DeepEqual(original.Status, chg.Status) {
+			_ = r.Status().Patch(ctx, &chg, client.MergeFrom(original))
+		}
 		return ctrl.Result{RequeueAfter: waitDuration}, nil
 	}
 
@@ -120,7 +125,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// 5. Post-Validation Logic (Tri-state fail-closed gate evaluation)
+	// 5. Post-Validation Logic & Maintenance Pipeline (PreChecking -> InProgress -> Stabilizing -> Validated)
 	validationRes, _ := r.evaluateGates(&chg, now)
 	chg.Status.Validation = validationRes
 
@@ -161,7 +166,11 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	default:
 		// Reset stabilization clock on regression
 		chg.Status.StabilizationStartedAt = nil
-		chg.Status.Phase = "InProgress"
+		if previousPhase == "Pending" || previousPhase == "" {
+			chg.Status.Phase = "PreChecking"
+		} else {
+			chg.Status.Phase = "InProgress"
+		}
 		chg.Status.OverallStatus = "InProgress"
 		requeueAfter = 15 * time.Second
 	}
@@ -200,6 +209,14 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow, now time.Time) (gitopsv1alpha1.ValidationResult, []string) {
 	var issues []string
+
+	gateClusterOps := gitopsv1alpha1.GateResult{
+		Name:       "ClusterOperatorsHealthy",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "AllClusterOperatorsHealthy",
+		Message:    "All OpenShift ClusterOperators report Available=True and Degraded=False",
+		ObservedAt: metav1.NewTime(now),
+	}
 
 	gateAllChanges := gitopsv1alpha1.GateResult{
 		Name:       "AllChangesApplied",
@@ -265,6 +282,7 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 	}
 
 	totalClusterStates := 0
+	observedAnyClusterOps := false
 	observedAnyMCP := false
 	observedAnyVirt := false
 
@@ -278,6 +296,18 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 
 		for _, cs := range appStateMap.ClusterStates {
 			totalClusterStates++
+
+			if len(cs.PlatformObservation.ClusterOperators) > 0 {
+				observedAnyClusterOps = true
+				for _, co := range cs.PlatformObservation.ClusterOperators {
+					if co.Degraded || !co.Available {
+						gateClusterOps.Status = gitopsv1alpha1.GateStatusFalse
+						gateClusterOps.Reason = "ClusterOperatorDegradedOrUnavailable"
+						gateClusterOps.Message = fmt.Sprintf("ClusterOperator %s is degraded=%v, available=%v", co.Name, co.Degraded, co.Available)
+						issues = append(issues, fmt.Sprintf("%s/%s: ClusterOperator %s degraded/unavailable", appName, cs.ClusterName, co.Name))
+					}
+				}
+			}
 
 			if cs.State != "InSync" {
 				gateAllChanges.Status = gitopsv1alpha1.GateStatusFalse
@@ -387,6 +417,12 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 		}
 	}
 
+	if !observedAnyClusterOps {
+		gateClusterOps.Status = gitopsv1alpha1.GateStatusUnknown
+		gateClusterOps.Reason = "ClusterOperatorsNotReported"
+		gateClusterOps.Message = "OpenShift ClusterOperator telemetry was not observed for any cluster"
+	}
+
 	if !observedAnyMCP {
 		gateMCP.Status = gitopsv1alpha1.GateStatusUnknown
 		gateMCP.Reason = "MCPStatusNotReported"
@@ -400,6 +436,7 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 	}
 
 	if totalClusterStates == 0 {
+		gateClusterOps.Status = gitopsv1alpha1.GateStatusUnknown
 		gateAllChanges.Status = gitopsv1alpha1.GateStatusUnknown
 		gateAllChanges.Reason = "NoClusterStatesObserved"
 		gateAllChanges.Message = "No per-cluster state reports were observed"
@@ -417,6 +454,7 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 	}
 
 	gateResults := []gitopsv1alpha1.GateResult{
+		gateClusterOps,
 		gateAllChanges,
 		gateHealth,
 		gateMCP,
@@ -438,16 +476,17 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 	passed := allTrue && noSilence && len(chg.Spec.ImpactedApps) > 0
 
 	res := gitopsv1alpha1.ValidationResult{
-		AllChangesApplied: gateAllChanges.Status == gitopsv1alpha1.GateStatusTrue,
-		HealthCheckPassed: gateHealth.Status == gitopsv1alpha1.GateStatusTrue,
-		MCPUpdatedOnTime:  gateMCP.Status == gitopsv1alpha1.GateStatusTrue,
-		EventsClean:       gateEvents.Status == gitopsv1alpha1.GateStatusTrue,
-		ObjectsConverged:  gateObjects.Status == gitopsv1alpha1.GateStatusTrue,
-		DependenciesReady: gateDeps.Status == gitopsv1alpha1.GateStatusTrue,
-		VirtImpactPassed:  gateVirt.Status == gitopsv1alpha1.GateStatusTrue,
-		GateResults:       gateResults,
-		IssuesFound:       issues,
-		Passed:            passed,
+		ClusterOperatorsHealthy: gateClusterOps.Status == gitopsv1alpha1.GateStatusTrue,
+		AllChangesApplied:       gateAllChanges.Status == gitopsv1alpha1.GateStatusTrue,
+		HealthCheckPassed:       gateHealth.Status == gitopsv1alpha1.GateStatusTrue,
+		MCPUpdatedOnTime:        gateMCP.Status == gitopsv1alpha1.GateStatusTrue,
+		EventsClean:             gateEvents.Status == gitopsv1alpha1.GateStatusTrue,
+		ObjectsConverged:        gateObjects.Status == gitopsv1alpha1.GateStatusTrue,
+		DependenciesReady:       gateDeps.Status == gitopsv1alpha1.GateStatusTrue,
+		VirtImpactPassed:        gateVirt.Status == gitopsv1alpha1.GateStatusTrue,
+		GateResults:             gateResults,
+		IssuesFound:             issues,
+		Passed:                  passed,
 	}
 
 	return res, issues

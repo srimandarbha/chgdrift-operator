@@ -62,6 +62,29 @@ spec:
                     unavailableNodeCount: { type: integer }
                     degradedNodeCount: { type: integer }
                     phase: { type: string }
+                platformObservation:
+                  type: object
+                  properties:
+                    clusterOperators:
+                      type: array
+                      items:
+                        type: object
+                        required: ["name", "available", "degraded"]
+                        properties:
+                          name: { type: string }
+                          available: { type: boolean }
+                          degraded: { type: boolean }
+                          progressing: { type: boolean }
+                          version: { type: string }
+                    virtWorkloads:
+                      type: object
+                      properties:
+                        totalVMIs: { type: integer }
+                        runningVMIs: { type: integer }
+                        liveMigratableVMIs: { type: integer }
+                        activeMigrations: { type: integer }
+                        stalledMigrations: { type: integer }
+                        unmigratableVMIs: { type: integer }
                 # Spoke-collected observability data — only populated when
                 # the app is OutOfSync or Degraded to keep etcd writes cheap.
                 recentEvents:

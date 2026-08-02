@@ -37,6 +37,11 @@ rules:
     resources: ["clusterappreports"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 
+  # OpenShift ClusterOperator and ClusterVersion platform checks.
+  - apiGroups: ["config.openshift.io"]
+    resources: ["clusteroperators", "clusterversions"]
+    verbs: ["get", "list", "watch"]
+
   # MachineConfigPool is cluster-scoped.
   - apiGroups: ["machineconfiguration.openshift.io"]
     resources: ["machineconfigpools"]

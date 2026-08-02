@@ -107,6 +107,36 @@ type MachineConfigPoolStatus struct {
 	Conditions            []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// ClusterOperatorStatus captures OpenShift platform operator health.
+type ClusterOperatorStatus struct {
+	Name        string `json:"name"`
+	Available   bool   `json:"available"`
+	Degraded    bool   `json:"degraded"`
+	Progressing bool   `json:"progressing"`
+	Version     string `json:"version,omitempty"`
+}
+
+// VirtualizationWorkloadSummary captures VMI counts and migration metrics.
+type VirtualizationWorkloadSummary struct {
+	TotalVMIs          int32 `json:"totalVMIs,omitempty"`
+	RunningVMIs        int32 `json:"runningVMIs,omitempty"`
+	LiveMigratableVMIs int32 `json:"liveMigratableVMIs,omitempty"`
+	ActiveMigrations   int32 `json:"activeMigrations,omitempty"`
+	StalledMigrations  int32 `json:"stalledMigrations,omitempty"`
+	UnmigratableVMIs   int32 `json:"unmigratableVMIs,omitempty"`
+}
+
+// PlatformObservationStatus encapsulates infrastructure observation telemetry.
+type PlatformObservationStatus struct {
+	// +listType=atomic
+	ClusterOperators []ClusterOperatorStatus       `json:"clusterOperators,omitempty"`
+	// +listType=atomic
+	MachineConfigPools []MachineConfigPoolStatus    `json:"machineConfigPools,omitempty"`
+	VirtHealth         VirtualizationImpactStatus  `json:"virtHealth,omitempty"`
+	VirtWorkloads      VirtualizationWorkloadSummary `json:"virtWorkloads,omitempty"`
+	ObservedAt         metav1.Time                 `json:"observedAt,omitempty"`
+}
+
 // ----------------------------------------------------------------------------
 // ClusterAppReport: one per (cluster, app). Written ONLY by the agent running
 // in that cluster, using a ServiceAccount scoped to create/update/get on this
@@ -142,6 +172,9 @@ type ClusterAppReportSpec struct {
 
 	// VirtStatus captures OpenShift Virtualization platform impact and workload health.
 	VirtStatus VirtualizationImpactStatus `json:"virtStatus,omitempty"`
+
+	// PlatformObservation captures infrastructure observation telemetry (ClusterOperators, Virt workloads).
+	PlatformObservation PlatformObservationStatus `json:"platformObservation,omitempty"`
 
 	// ObservedAt is when the agent captured this snapshot locally.
 	ObservedAt metav1.Time `json:"observedAt"`
@@ -213,6 +246,7 @@ type ClusterRevisionState struct {
 	SawReportSinceChgStart bool                       `json:"sawReportSinceChgStart,omitempty"`
 	MCPStatus              MachineConfigPoolStatus    `json:"mcpStatus,omitempty"`
 	VirtStatus             VirtualizationImpactStatus `json:"virtStatus,omitempty"`
+	PlatformObservation    PlatformObservationStatus `json:"platformObservation,omitempty"`
 	// State summarizes this row: InSync | Lagging | Diverged | Stale | Missing
 	State string `json:"state"`
 
@@ -337,6 +371,8 @@ type ValidationResult struct {
 	DependenciesReady bool `json:"dependenciesReady"`
 	// VirtImpactPassed is true when OpenShift Virtualization component health and live migration criteria are met.
 	VirtImpactPassed bool `json:"virtImpactPassed"`
+	// ClusterOperatorsHealthy is true when all OpenShift platform ClusterOperators are Available and non-degraded.
+	ClusterOperatorsHealthy bool `json:"clusterOperatorsHealthy"`
 	// GateResults carries structured tri-state (True/False/Unknown) assessment per validation gate.
 	// +listType=atomic
 	GateResults []GateResult `json:"gateResults,omitempty"`

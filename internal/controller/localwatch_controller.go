@@ -112,10 +112,21 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		spec.Dependencies = r.checkDependencies(ctx, desc.Namespace, &cm)
 	}
 
-	// MCP and Virt status are collected on each reconcile.
+	// MCP, Virt, ClusterOperators, and PlatformObservation status are collected on each reconcile.
 	mcpPool := cm.Labels["gitops.example.com/mcp-pool"]
 	spec.MCPStatus = r.readMachineConfigPool(ctx, mcpPool)
-	spec.VirtStatus = r.readVirtualizationStatus(ctx, desc.Namespace)
+	virtHealth, virtWorkloads := r.readVirtualizationStatus(ctx, desc.Namespace)
+	spec.VirtStatus = virtHealth
+
+	clusterOps := r.readClusterOperators(ctx)
+
+	spec.PlatformObservation = gitopsv1alpha1.PlatformObservationStatus{
+		ClusterOperators:   clusterOps,
+		MachineConfigPools: []gitopsv1alpha1.MachineConfigPoolStatus{spec.MCPStatus},
+		VirtHealth:         virtHealth,
+		VirtWorkloads:      virtWorkloads,
+		ObservedAt:         metav1.Now(),
+	}
 
 	if err := r.upsertReport(ctx, reportName, spec); err != nil {
 		if apierrors.IsConflict(err) {
@@ -356,8 +367,60 @@ func (r *LocalAppWatchReconciler) isDataVolumeReady(ctx context.Context, namespa
 }
 
 // -------------------------------------------------------------------------
-// MachineConfigPool & Virtualization Status
+// ClusterOperators, MachineConfigPool & Virtualization Status
 // -------------------------------------------------------------------------
+
+func (r *LocalAppWatchReconciler) readClusterOperators(ctx context.Context) []gitopsv1alpha1.ClusterOperatorStatus {
+	var coList unstructured.UnstructuredList
+	coList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "config.openshift.io",
+		Version: "v1",
+		Kind:    "ClusterOperator",
+	})
+
+	if err := r.List(ctx, &coList); err != nil {
+		return nil
+	}
+
+	var results []gitopsv1alpha1.ClusterOperatorStatus
+	for _, co := range coList.Items {
+		name := co.GetName()
+		status := gitopsv1alpha1.ClusterOperatorStatus{
+			Name: name,
+		}
+
+		conditions, found, _ := unstructured.NestedSlice(co.Object, "status", "conditions")
+		if found {
+			for _, condRaw := range conditions {
+				cond, ok := condRaw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				cType, _ := cond["type"].(string)
+				cStatus, _ := cond["status"].(string)
+				switch cType {
+				case "Available":
+					status.Available = cStatus == "True"
+				case "Degraded":
+					status.Degraded = cStatus == "True"
+				case "Progressing":
+					status.Progressing = cStatus == "True"
+				}
+			}
+		}
+
+		versions, found, _ := unstructured.NestedSlice(co.Object, "status", "versions")
+		if found && len(versions) > 0 {
+			if vMap, ok := versions[0].(map[string]interface{}); ok {
+				ver, _ := vMap["version"].(string)
+				status.Version = ver
+			}
+		}
+
+		results = append(results, status)
+	}
+	return results
+}
 
 func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, preferredPool string) gitopsv1alpha1.MachineConfigPoolStatus {
 	poolName := preferredPool
@@ -402,7 +465,6 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, pre
 	currentConfig, _, _ := unstructured.NestedString(mcp.Object, "status", "configuration", "name")
 	desiredConfig, _, _ := unstructured.NestedString(mcp.Object, "spec", "configuration", "name")
 
-	// In MCO status, updating nodes are nodes that have not finished updating to desired config
 	updatingCount := machineCount - updatedCount
 	if updatingCount < 0 {
 		updatingCount = 0
@@ -430,11 +492,12 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, pre
 	}
 }
 
-func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, appNamespace string) gitopsv1alpha1.VirtualizationImpactStatus {
-	status := gitopsv1alpha1.VirtualizationImpactStatus{
+func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, appNamespace string) (gitopsv1alpha1.VirtualizationImpactStatus, gitopsv1alpha1.VirtualizationWorkloadSummary) {
+	health := gitopsv1alpha1.VirtualizationImpactStatus{
 		HyperConvergedHealth: "Healthy",
 		VirtHandlerReady:     true,
 	}
+	workloads := gitopsv1alpha1.VirtualizationWorkloadSummary{}
 
 	// 1. Check HyperConverged status in openshift-cnv or fallback namespace
 	hco := &unstructured.Unstructured{}
@@ -457,7 +520,7 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 					cType, _ := cond["type"].(string)
 					cStatus, _ := cond["status"].(string)
 					if cType == "Degraded" && cStatus == "True" {
-						status.HyperConvergedHealth = "Degraded"
+						health.HyperConvergedHealth = "Degraded"
 					}
 				}
 			}
@@ -465,7 +528,7 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 		}
 	}
 	if !foundHCO {
-		status.HyperConvergedHealth = "Unknown"
+		health.HyperConvergedHealth = "Unknown"
 	}
 
 	// 2. Check virt-handler DaemonSet readiness
@@ -481,7 +544,7 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 				desired, _, _ := unstructured.NestedInt64(ds.Object, "status", "desiredNumberScheduled")
 				ready, _, _ := unstructured.NestedInt64(ds.Object, "status", "numberReady")
 				if desired > 0 && ready < desired {
-					status.VirtHandlerReady = false
+					health.VirtHandlerReady = false
 				}
 			}
 		}
@@ -503,9 +566,11 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 			phase, _, _ := unstructured.NestedString(vmim.Object, "status", "phase")
 			switch phase {
 			case "Scheduling", "Scheduled", "PreparingTarget", "TargetReady", "Running":
-				status.ActiveMigrations++
+				health.ActiveMigrations++
+				workloads.ActiveMigrations++
 			case "Failed":
-				status.StalledMigrations++
+				health.StalledMigrations++
+				workloads.StalledMigrations++
 			}
 			conditions, found, _ := unstructured.NestedSlice(vmim.Object, "status", "conditions")
 			if found {
@@ -517,7 +582,8 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 					cType, _ := cond["type"].(string)
 					cStatus, _ := cond["status"].(string)
 					if cType == "Stalled" && cStatus == "True" {
-						status.StalledMigrations++
+						health.StalledMigrations++
+						workloads.StalledMigrations++
 					}
 				}
 			}
@@ -532,7 +598,13 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 		Kind:    "VirtualMachineInstance",
 	})
 	if err := r.List(ctx, &vmiList, client.InNamespace(targetNS), client.Limit(100)); err == nil {
+		workloads.TotalVMIs = int32(len(vmiList.Items))
 		for _, vmi := range vmiList.Items {
+			phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
+			if phase == "Running" {
+				workloads.RunningVMIs++
+			}
+			isLiveMigratable := true
 			conditions, found, _ := unstructured.NestedSlice(vmi.Object, "status", "conditions")
 			if found {
 				for _, condRaw := range conditions {
@@ -543,14 +615,19 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 					cType, _ := cond["type"].(string)
 					cStatus, _ := cond["status"].(string)
 					if cType == "LiveMigratable" && cStatus == "False" {
-						status.UnmigratableVMIs++
+						isLiveMigratable = false
+						health.UnmigratableVMIs++
+						workloads.UnmigratableVMIs++
 					}
 				}
+			}
+			if isLiveMigratable {
+				workloads.LiveMigratableVMIs++
 			}
 		}
 	}
 
-	return status
+	return health, workloads
 }
 
 // -------------------------------------------------------------------------

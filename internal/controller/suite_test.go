@@ -183,6 +183,12 @@ func TestChangeWindowReconcile(t *testing.T) {
 						HyperConvergedHealth: "Healthy",
 						VirtHandlerReady:     true,
 					},
+					PlatformObservation: gitopsv1alpha1.PlatformObservationStatus{
+						ClusterOperators: []gitopsv1alpha1.ClusterOperatorStatus{
+							{Name: "machine-config", Available: true, Degraded: false},
+							{Name: "kubevirt", Available: true, Degraded: false},
+						},
+					},
 				},
 			},
 		},
@@ -226,6 +232,96 @@ func TestChangeWindowReconcile(t *testing.T) {
 	}
 	if updatedCHG.Status.Phase != "Validated" {
 		t.Errorf("expected phase Validated, got %s", updatedCHG.Status.Phase)
+	}
+	if !updatedCHG.Status.Validation.ClusterOperatorsHealthy {
+		t.Errorf("expected ClusterOperatorsHealthy to be true, got false")
+	}
+}
+
+func TestClusterOperatorDegradedFailGate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	now := time.Now()
+	startTime := metav1.NewTime(now.Add(-10 * time.Minute))
+	endTime := metav1.NewTime(now.Add(50 * time.Minute))
+
+	chg := &gitopsv1alpha1.ChangeWindow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chg-co-degraded",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.ChangeWindowSpec{
+			CHGNumber:    "CHG-CO-DEGRADED",
+			ImpactedApps: []string{"svc-payments"},
+			StartTime:    startTime,
+			EndTime:      endTime,
+		},
+	}
+
+	ps := &gitopsv1alpha1.PropagationStatus{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "svc-payments",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.PropagationStatusSpec{
+			AppName:        "svc-payments",
+			TargetClusters: []string{"us-east-01"},
+		},
+		Status: gitopsv1alpha1.PropagationStatusStatus{
+			Phase: "Synced",
+			ClusterStates: []gitopsv1alpha1.ClusterRevisionState{
+				{
+					ClusterName: "us-east-01",
+					SyncStatus:  "Synced",
+					Health:      "Healthy",
+					State:       "InSync",
+					PlatformObservation: gitopsv1alpha1.PlatformObservationStatus{
+						ClusterOperators: []gitopsv1alpha1.ClusterOperatorStatus{
+							{Name: "network", Available: true, Degraded: true}, // Degraded ClusterOperator
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(chg, ps).
+		WithStatusSubresource(chg, ps).
+		WithIndex(&gitopsv1alpha1.PropagationStatus{}, "spec.appName", func(obj client.Object) []string {
+			p, ok := obj.(*gitopsv1alpha1.PropagationStatus)
+			if !ok || p.Spec.AppName == "" {
+				return nil
+			}
+			return []string{p.Spec.AppName}
+		}).
+		Build()
+
+	r := &ChangeWindowReconciler{
+		Client: fakeClient,
+	}
+
+	req := ctrlRequest("default", "chg-co-degraded")
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	var updatedCHG gitopsv1alpha1.ChangeWindow
+	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "chg-co-degraded"}, &updatedCHG); err != nil {
+		t.Fatalf("failed to fetch updated ChangeWindow: %v", err)
+	}
+
+	if updatedCHG.Status.Validation.Passed {
+		t.Errorf("expected validation.Passed to be false due to degraded ClusterOperator")
+	}
+	if updatedCHG.Status.Validation.ClusterOperatorsHealthy {
+		t.Errorf("expected ClusterOperatorsHealthy to be false, got true")
 	}
 }
 
