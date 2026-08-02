@@ -52,12 +52,15 @@ func main() {
 	// all goroutines share the same shutdown signal.
 	ctx := ctrl.SetupSignalHandler()
 
+	operatorNamespace := getenv("OPERATOR_NAMESPACE", "gitops-fleet")
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "drift-operator-leader-lock",
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress:  probeAddr,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        "drift-operator-leader-lock",
+		LeaderElectionNamespace: operatorNamespace,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
