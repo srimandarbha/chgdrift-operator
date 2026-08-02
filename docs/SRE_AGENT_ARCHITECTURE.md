@@ -1,10 +1,10 @@
 # Standalone External SRE Agent & Spoke Operator Architecture
 
-This document provides a complete guide for developing the **Central SRE Agent** from scratch, detailing its system topology, Git branch/PR extraction logic (`main`, `sit`, release tags), blast radius derivation (applications, namespaces, clusters), JSON payload planning, and full Python / LangGraph pseudocode.
+This document provides a complete guide for developing the **Standalone SRE Agent** and **Autonomous Federated Peer-to-Peer `drift-operator`**, detailing system topology, Git branch/PR extraction logic (`main`, `sit`, release tags), blast radius derivation (applications, namespaces, clusters), JSON payload planning, and autonomous cluster validation reporting over Kafka.
 
 ---
 
-## 1. System Topology Overview (External Agent Topology)
+## 1. System Topology Overview (Autonomous Federated Peer-to-Peer Topology)
 
 ```
                        ┌─────────────────────────────────────────────────────────────┐
@@ -14,7 +14,7 @@ This document provides a complete guide for developing the **Central SRE Agent**
                        │      - Receives GitHub Webhooks (`main`/`sit` merges)       │
                        │      - Interacts with GitHub REST API (PRs, Tags, Diffs)    │
                        │      - Consumes Kafka CHG Events (`CHG0012345`)              │
-                       │      - Stores PR & State Cache in PostgreSQL DB (Flat Tables + pgvector RAG) │
+                       │      - Stores PR & State Cache in PostgreSQL DB              │
                        │      - Executes LangGraph LLM Root Cause Analysis           │
                        │      - Commits Log Evidence to `gitops-evidence-repo`       │
                        │      - Posts Adaptive Cards directly to MS Teams            │
@@ -31,10 +31,11 @@ This document provides a complete guide for developing the **Central SRE Agent**
                     ┌─────────────────────────────────┼─────────────────────────────────┐
                     ▼                                 ▼                                 ▼
    ┌────────────────────────────────┐┌────────────────────────────────┐┌────────────────────────────────┐
-   │ SPOKE CLUSTER 1 (Baremetal)    ││ SPOKE CLUSTER 2 (Baremetal)    ││ RHACM HUB CLUSTER              │
+   │ CLUSTER 1 (Autonomous Peer)    ││ CLUSTER 2 (Autonomous Peer)    ││ CLUSTER N (Autonomous Peer)    │
    │ [ drift-operator ] (Go)        ││ [ drift-operator ] (Go)        ││ [ drift-operator ] (Go)        │
-   │  - Inspects Argo CD Health     ││  - Inspects Argo CD Health     ││  - Inspects Local Workloads    │
-   │  - Monitors OpenShift MCP      ││  - Monitors OpenShift MCP      ││  (Treated as just Spoke #3)    │
+   │  - Self-filters $CLUSTER_NAME  ││  - Self-filters $CLUSTER_NAME  ││  - Self-filters $CLUSTER_NAME  │
+   │  - Evaluates local 8 gates     ││  - Evaluates local 8 gates     ││  - Evaluates local 8 gates     │
+   │  - Publishes validation report ││  - Publishes validation report ││  - Publishes validation report │
    └────────────────────────────────┘└────────────────────────────────┘└────────────────────────────────┘
 ```
 

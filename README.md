@@ -62,10 +62,11 @@ drift-operator/
 
 ## Features
 
-- **Three Core CRDs**:
-  - `ClusterAppReport`: Written only by downstream cluster agents. Relays `syncStatus`, `health`, OpenShift `mcpStatus`, `virtStatus`, and `platformObservation` (ClusterOperators, VMI workload telemetry).
-  - `PropagationStatus`: Managed by central operator to aggregate fleet status (`InSync`, `Propagating`, `Lagging`, `Diverged`, `Stale`, `Missing`).
-  - `ChangeWindow`: Manages CHG maintenance windows, maintenance silence, log collection, MCP rollout tracking, OpenShift Virtualization live migration tracking, and Kafka reporting.
+- **Autonomous Federated Peer-to-Peer Architecture**:
+  - **Decentralized Execution**: Every cluster runs an autonomous operator instance with its local `$CLUSTER_NAME`. Operators process Kafka events independently without single points of failure (SPOF) or cross-cluster API dependencies.
+  - **Target Cluster Self-Filtering**: When a `CHG_INITIATED` event is received over Kafka (`gitops.chg.events`), each cluster checks if its `$CLUSTER_NAME` is included in `blastRadius.targetClusters`. Targeted clusters create local `ChangeWindow` CRs and validate 8 safety gates locally.
+  - **Direct Kafka Validation Reporting**: Targeted clusters evaluate local workloads, MachineConfigPools, and KubeVirt VM migrations, emitting validation reports directly to `gitops.change.validation`.
+  - `ChangeWindow`: Manages local CHG maintenance windows, maintenance silence, log collection, MCP rollout tracking, OpenShift Virtualization live migration tracking, and Kafka reporting.
 - **Real Kafka Integration (`internal/kafka/kafka_bridge.go`)**:
   - Ingests `CHG_INITIATED` events from topic `gitops.chg.events` to dynamically create `ChangeWindow` CRs with context-aware retry loops to guarantee zero message loss on K8s API server downtime.
   - Emits LLM-understandable validation reports to topic `gitops.change.validation` **immediately on phase changes, component updates, or issues found**, with a **15-minute throttled heartbeat** during steady-state.

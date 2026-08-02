@@ -354,8 +354,15 @@ func (r *LocalAppWatchReconciler) checkDependencies(ctx context.Context, namespa
 		case "Secret":
 			var target corev1.Secret
 			dep.Ready = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &target) == nil
+		case "ServiceAccount":
+			var target corev1.ServiceAccount
+			dep.Ready = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &target) == nil
 		case "DataVolume":
 			dep.Ready = r.isDataVolumeReady(ctx, namespace, name)
+		case "MachineConfig":
+			dep.Ready = r.isMachineConfigReady(ctx, name)
+		case "StorageClass":
+			dep.Ready = r.isStorageClassReady(ctx, name)
 		default:
 			dep.Ready = false
 			dep.Note = fmt.Sprintf("readiness check not implemented for kind %s", kind)
@@ -363,6 +370,26 @@ func (r *LocalAppWatchReconciler) checkDependencies(ctx context.Context, namespa
 		results = append(results, dep)
 	}
 	return results
+}
+
+func (r *LocalAppWatchReconciler) isMachineConfigReady(ctx context.Context, name string) bool {
+	mc := &unstructured.Unstructured{}
+	mc.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "machineconfiguration.openshift.io",
+		Version: "v1",
+		Kind:    "MachineConfig",
+	})
+	return r.Get(ctx, types.NamespacedName{Name: name}, mc) == nil
+}
+
+func (r *LocalAppWatchReconciler) isStorageClassReady(ctx context.Context, name string) bool {
+	sc := &unstructured.Unstructured{}
+	sc.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "storage.k8s.io",
+		Version: "v1",
+		Kind:    "StorageClass",
+	})
+	return r.Get(ctx, types.NamespacedName{Name: name}, sc) == nil
 }
 
 func (r *LocalAppWatchReconciler) isDataVolumeReady(ctx context.Context, namespace, name string) bool {
