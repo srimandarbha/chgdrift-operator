@@ -18,7 +18,6 @@ import (
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 	"example.com/drift-operator/internal/kafka"
@@ -113,7 +112,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	chg.Status.SilentClusters = silentClusters
 
-	// 4. Action Execution (Parked Hard Refresh Action Skeleton)
+	// 4. Action Execution (Parked Hard Refresh Action)
 	for appName, appStateMap := range chg.Status.AppStates {
 		for _, cs := range appStateMap.ClusterStates {
 			if cs.State == "Diverged" || cs.State == "OutOfSync" {
@@ -122,67 +121,46 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// 5. Post-Validation Logic (all seven gates must pass for Passed=true)
-	allConverged := true
-	healthCheckPassed := true
-	mcpUpdatedOnTime := true
-	eventsClean := true
-	objectsConverged := true
-	dependenciesReady := true
-
-	for _, appStateMap := range chg.Status.AppStates {
-		for _, cs := range appStateMap.ClusterStates {
-			if cs.State != "InSync" {
-				allConverged = false
-			}
-			if cs.Health != "Healthy" && cs.Health != "" {
-				healthCheckPassed = false
-			}
-			if cs.MCPStatus.UpdatingNodeCount > 0 || cs.MCPStatus.DegradedNodeCount > 0 ||
-				cs.MCPStatus.Phase == "Updating" || cs.MCPStatus.Phase == "Degraded" {
-				mcpUpdatedOnTime = false
-			}
-			if len(cs.RecentEvents) > 0 {
-				eventsClean = false
-			}
-			for _, oc := range cs.ObjectChanges {
-				if oc.ChangeType == "Failed" {
-					objectsConverged = false
-				}
-			}
-			for _, dep := range cs.Dependencies {
-				if !dep.Ready {
-					dependenciesReady = false
-				}
-			}
-		}
-	}
-
-	issuesFound := r.buildIssuesList(&chg)
-	noSilence := len(chg.Status.SilentClusters) == 0
-
-	chg.Status.Validation = gitopsv1alpha1.ValidationResult{
-		AllChangesApplied: allConverged,
-		HealthCheckPassed: healthCheckPassed,
-		MCPUpdatedOnTime:  mcpUpdatedOnTime,
-		EventsClean:       eventsClean,
-		ObjectsConverged:  objectsConverged,
-		DependenciesReady: dependenciesReady,
-		IssuesFound:       issuesFound,
-		Passed: allConverged && healthCheckPassed && mcpUpdatedOnTime &&
-			eventsClean && objectsConverged && dependenciesReady && noSilence,
-	}
+	// 5. Post-Validation Logic (Tri-state fail-closed gate evaluation)
+	validationRes, _ := r.evaluateGates(&chg, now)
+	chg.Status.Validation = validationRes
 
 	previousPhase := chg.Status.Phase
-	if chg.Status.Validation.Passed {
-		chg.Status.Phase = "Validated"
-		chg.Status.OverallStatus = "Good"
-	} else if now.After(chg.Spec.EndTime.Time) {
+	var requeueAfter time.Duration
+
+	switch {
+	case validationRes.Passed:
+		stabSeconds := time.Duration(orDefault(chg.Spec.StabilizationPeriodSeconds, 0)) * time.Second
+		if stabSeconds > 0 {
+			if chg.Status.StabilizationStartedAt == nil {
+				nowMeta := metav1.NewTime(now)
+				chg.Status.StabilizationStartedAt = &nowMeta
+			}
+			stabEnd := chg.Status.StabilizationStartedAt.Time.Add(stabSeconds)
+			if now.Before(stabEnd) {
+				chg.Status.Phase = "Stabilizing"
+				chg.Status.OverallStatus = "InProgress"
+				requeueAfter = 15 * time.Second
+			} else {
+				chg.Status.Phase = "Validated"
+				chg.Status.OverallStatus = "Good"
+				requeueAfter = 60 * time.Second
+			}
+		} else {
+			chg.Status.Phase = "Validated"
+			chg.Status.OverallStatus = "Good"
+			requeueAfter = 60 * time.Second
+		}
+
+	case now.After(chg.Spec.EndTime.Time):
 		chg.Status.Phase = "ValidationFailed"
 		chg.Status.OverallStatus = "Degraded"
-	} else {
+		requeueAfter = 60 * time.Second
+
+	default:
 		chg.Status.Phase = "InProgress"
 		chg.Status.OverallStatus = "InProgress"
+		requeueAfter = 15 * time.Second
 	}
 
 	// 6. Generate Kafka JSON Report on phase transition or 60s tick
@@ -190,15 +168,16 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		reportPayload, err := r.BuildKafkaReportJSON(&chg, now)
 		if err == nil {
 			logger.Info("Kafka report compiled", "chg", chg.Spec.CHGNumber, "phase", chg.Status.Phase, "payloadSizeBytes", len(reportPayload))
-			// Publish to Kafka when the bridge is configured.
-			// Errors are logged but not returned; a Kafka outage must never
-			// block status reconciliation or cause a requeue storm.
+			publishedSuccessfully := true
 			if r.KafkaBridge != nil {
 				if kerr := r.KafkaBridge.ProduceReport(ctx, chg.Spec.CHGNumber, reportPayload); kerr != nil {
 					logger.Error(kerr, "failed to publish report to Kafka", "chg", chg.Spec.CHGNumber)
+					publishedSuccessfully = false
 				}
 			}
-			chg.Status.LastReportedAt = metav1.NewTime(now)
+			if publishedSuccessfully {
+				chg.Status.LastReportedAt = metav1.NewTime(now)
+			}
 		}
 	}
 
@@ -213,11 +192,231 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	if chg.Status.Phase == "InProgress" {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow, now time.Time) (gitopsv1alpha1.ValidationResult, []string) {
+	var issues []string
+
+	gateAllChanges := gitopsv1alpha1.GateResult{
+		Name:       "AllChangesApplied",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "AllClustersInSync",
+		Message:    "All target cluster applications report InSync",
+		ObservedAt: metav1.NewTime(now),
 	}
 
-	return ctrl.Result{}, nil
+	gateHealth := gitopsv1alpha1.GateResult{
+		Name:       "HealthCheckPassed",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "AllWorkloadsHealthy",
+		Message:    "All target cluster workloads report Healthy",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	gateMCP := gitopsv1alpha1.GateResult{
+		Name:       "MCPUpdatedOnTime",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "MachineConfigPoolConverged",
+		Message:    "MachineConfigPool rollout updated and non-degraded",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	gateEvents := gitopsv1alpha1.GateResult{
+		Name:       "EventsClean",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "NoNewWarningEvents",
+		Message:    "No unresolved warning events observed during window",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	gateObjects := gitopsv1alpha1.GateResult{
+		Name:       "ObjectsConverged",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "AllObjectsConverged",
+		Message:    "All declared objects synced without failure",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	gateDeps := gitopsv1alpha1.GateResult{
+		Name:       "DependenciesReady",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "AllDependenciesReady",
+		Message:    "All referenced external dependencies are ready",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	gateVirt := gitopsv1alpha1.GateResult{
+		Name:       "VirtImpactPassed",
+		Status:     gitopsv1alpha1.GateStatusTrue,
+		Reason:     "VirtualizationPlatformHealthy",
+		Message:    "HyperConverged healthy and no stalled migrations",
+		ObservedAt: metav1.NewTime(now),
+	}
+
+	if len(chg.Spec.ImpactedApps) == 0 {
+		gateAllChanges.Status = gitopsv1alpha1.GateStatusUnknown
+		gateAllChanges.Reason = "NoImpactedAppsConfigured"
+		gateAllChanges.Message = "spec.impactedApps is empty; platform target scope missing"
+		issues = append(issues, "spec.impactedApps is empty; validation cannot execute without scope")
+	}
+
+	totalClusterStates := 0
+	for appName, appStateMap := range chg.Status.AppStates {
+		if len(appStateMap.ClusterStates) == 0 {
+			gateAllChanges.Status = gitopsv1alpha1.GateStatusUnknown
+			gateAllChanges.Reason = "MissingAppPropagationStatus"
+			gateAllChanges.Message = fmt.Sprintf("No cluster propagation status found for app %s", appName)
+			issues = append(issues, fmt.Sprintf("%s: missing cluster propagation status", appName))
+		}
+
+		for _, cs := range appStateMap.ClusterStates {
+			totalClusterStates++
+
+			if cs.State != "InSync" {
+				gateAllChanges.Status = gitopsv1alpha1.GateStatusFalse
+				gateAllChanges.Reason = "ClusterNotInSync"
+				gateAllChanges.Message = fmt.Sprintf("App %s on cluster %s is %s", appName, cs.ClusterName, cs.State)
+				issues = append(issues, fmt.Sprintf("%s/%s: state is %s", appName, cs.ClusterName, cs.State))
+			}
+
+			if cs.Health != "Healthy" {
+				if cs.Health == "" || cs.Health == "Unknown" {
+					if gateHealth.Status != gitopsv1alpha1.GateStatusFalse {
+						gateHealth.Status = gitopsv1alpha1.GateStatusUnknown
+						gateHealth.Reason = "WorkloadHealthUnknown"
+						gateHealth.Message = fmt.Sprintf("App %s on cluster %s health is unknown", appName, cs.ClusterName)
+					}
+				} else {
+					gateHealth.Status = gitopsv1alpha1.GateStatusFalse
+					gateHealth.Reason = "WorkloadUnhealthy"
+					gateHealth.Message = fmt.Sprintf("App %s on cluster %s health is %s", appName, cs.ClusterName, cs.Health)
+				}
+				issues = append(issues, fmt.Sprintf("%s/%s: health is %s", appName, cs.ClusterName, cs.Health))
+			}
+
+			mcp := cs.MCPStatus
+			if mcp.Name != "" || mcp.Phase != "" {
+				if mcp.Phase == "Degraded" || mcp.DegradedNodeCount > 0 {
+					gateMCP.Status = gitopsv1alpha1.GateStatusFalse
+					gateMCP.Reason = "MCPDegraded"
+					gateMCP.Message = fmt.Sprintf("MachineConfigPool %s has %d degraded nodes", mcp.Name, mcp.DegradedNodeCount)
+					issues = append(issues, fmt.Sprintf("%s/%s: MCP %s degraded", appName, cs.ClusterName, mcp.Name))
+				} else if mcp.Phase == "Updating" || mcp.UpdatingNodeCount > 0 {
+					gateMCP.Status = gitopsv1alpha1.GateStatusFalse
+					gateMCP.Reason = "MCPUpdating"
+					gateMCP.Message = fmt.Sprintf("MachineConfigPool %s still updating %d nodes", mcp.Name, mcp.UpdatingNodeCount)
+					issues = append(issues, fmt.Sprintf("%s/%s: MCP %s updating", appName, cs.ClusterName, mcp.Name))
+				} else if mcp.MachineCount > 0 && mcp.ReadyMachineCount < mcp.MachineCount {
+					gateMCP.Status = gitopsv1alpha1.GateStatusFalse
+					gateMCP.Reason = "MCPNodesNotReady"
+					gateMCP.Message = fmt.Sprintf("MachineConfigPool %s ready count %d < total %d", mcp.Name, mcp.ReadyMachineCount, mcp.MachineCount)
+					issues = append(issues, fmt.Sprintf("%s/%s: MCP %s not all nodes ready", appName, cs.ClusterName, mcp.Name))
+				} else if mcp.DesiredRenderedConfig != "" && mcp.CurrentRenderedConfig != "" && mcp.DesiredRenderedConfig != mcp.CurrentRenderedConfig {
+					gateMCP.Status = gitopsv1alpha1.GateStatusFalse
+					gateMCP.Reason = "MCPConfigMismatch"
+					gateMCP.Message = fmt.Sprintf("MachineConfigPool %s current config %s does not match desired %s", mcp.Name, mcp.CurrentRenderedConfig, mcp.DesiredRenderedConfig)
+					issues = append(issues, fmt.Sprintf("%s/%s: MCP %s config mismatch", appName, cs.ClusterName, mcp.Name))
+				}
+			}
+
+			windowStart := chg.Spec.StartTime.Time
+			for _, ev := range cs.RecentEvents {
+				if ev.LastObservedAt.After(windowStart) || ev.LastObservedAt.Time.Equal(windowStart) {
+					gateEvents.Status = gitopsv1alpha1.GateStatusFalse
+					gateEvents.Reason = "WarningEventsObserved"
+					gateEvents.Message = fmt.Sprintf("Warning event %s on %s: %s", ev.Reason, ev.InvolvedObject, ev.Message)
+					issues = append(issues, fmt.Sprintf("%s/%s: Warning event %s on %s", appName, cs.ClusterName, ev.Reason, ev.InvolvedObject))
+				}
+			}
+
+			for _, oc := range cs.ObjectChanges {
+				if oc.ChangeType == "Failed" {
+					gateObjects.Status = gitopsv1alpha1.GateStatusFalse
+					gateObjects.Reason = "ObjectSyncFailed"
+					gateObjects.Message = fmt.Sprintf("Resource %s/%s failed sync", oc.Kind, oc.Name)
+					issues = append(issues, fmt.Sprintf("%s/%s: object %s/%s failed sync", appName, cs.ClusterName, oc.Kind, oc.Name))
+				}
+			}
+
+			for _, dep := range cs.Dependencies {
+				if !dep.Ready {
+					gateDeps.Status = gitopsv1alpha1.GateStatusFalse
+					gateDeps.Reason = "DependencyNotReady"
+					gateDeps.Message = fmt.Sprintf("Dependency %s/%s not ready (%s)", dep.Kind, dep.Name, dep.Note)
+					issues = append(issues, fmt.Sprintf("%s/%s: dependency %s/%s not ready", appName, cs.ClusterName, dep.Kind, dep.Name))
+				}
+			}
+
+			virt := cs.VirtStatus
+			if virt.HyperConvergedHealth == "Degraded" {
+				gateVirt.Status = gitopsv1alpha1.GateStatusFalse
+				gateVirt.Reason = "HyperConvergedDegraded"
+				gateVirt.Message = "OpenShift Virtualization HyperConverged deployment is degraded"
+				issues = append(issues, fmt.Sprintf("%s/%s: HyperConverged degraded", appName, cs.ClusterName))
+			}
+			if virt.StalledMigrations > 0 {
+				gateVirt.Status = gitopsv1alpha1.GateStatusFalse
+				gateVirt.Reason = "StalledMigrations"
+				gateVirt.Message = fmt.Sprintf("%d stalled VMI migrations observed", virt.StalledMigrations)
+				issues = append(issues, fmt.Sprintf("%s/%s: %d stalled migrations", appName, cs.ClusterName, virt.StalledMigrations))
+			}
+			if virt.UnmigratableVMIs > 0 {
+				gateVirt.Status = gitopsv1alpha1.GateStatusFalse
+				gateVirt.Reason = "UnmigratableVMIs"
+				gateVirt.Message = fmt.Sprintf("%d unmigratable VMIs observed on target nodes", virt.UnmigratableVMIs)
+				issues = append(issues, fmt.Sprintf("%s/%s: %d unmigratable VMIs", appName, cs.ClusterName, virt.UnmigratableVMIs))
+			}
+		}
+	}
+
+	if totalClusterStates == 0 {
+		gateAllChanges.Status = gitopsv1alpha1.GateStatusUnknown
+		gateAllChanges.Reason = "NoClusterStatesObserved"
+		gateAllChanges.Message = "No per-cluster state reports were observed"
+		gateHealth.Status = gitopsv1alpha1.GateStatusUnknown
+		issues = append(issues, "No cluster reports available to validate change")
+	}
+
+	for _, s := range chg.Status.SilentClusters {
+		issues = append(issues, fmt.Sprintf("%s/%s: cluster reporting silent (%s)", s.App, s.Cluster, s.State))
+	}
+
+	gateResults := []gitopsv1alpha1.GateResult{
+		gateAllChanges,
+		gateHealth,
+		gateMCP,
+		gateEvents,
+		gateObjects,
+		gateDeps,
+		gateVirt,
+	}
+
+	allTrue := true
+	for _, g := range gateResults {
+		if g.Status != gitopsv1alpha1.GateStatusTrue {
+			allTrue = false
+			break
+		}
+	}
+	noSilence := len(chg.Status.SilentClusters) == 0
+
+	passed := allTrue && noSilence && len(chg.Spec.ImpactedApps) > 0
+
+	res := gitopsv1alpha1.ValidationResult{
+		AllChangesApplied: gateAllChanges.Status == gitopsv1alpha1.GateStatusTrue,
+		HealthCheckPassed: gateHealth.Status == gitopsv1alpha1.GateStatusTrue,
+		MCPUpdatedOnTime:  gateMCP.Status == gitopsv1alpha1.GateStatusTrue,
+		EventsClean:       gateEvents.Status == gitopsv1alpha1.GateStatusTrue,
+		ObjectsConverged:  gateObjects.Status == gitopsv1alpha1.GateStatusTrue,
+		DependenciesReady: gateDeps.Status == gitopsv1alpha1.GateStatusTrue,
+		VirtImpactPassed:  gateVirt.Status == gitopsv1alpha1.GateStatusTrue,
+		GateResults:       gateResults,
+		IssuesFound:       issues,
+		Passed:            passed,
+	}
+
+	return res, issues
 }
 
 func (r *ChangeWindowReconciler) classifySilence(appName string, cs gitopsv1alpha1.ClusterRevisionState, chg *gitopsv1alpha1.ChangeWindow, now time.Time, staleThreshold time.Duration) gitopsv1alpha1.SilentClusterState {
@@ -278,24 +477,15 @@ func (r *ChangeWindowReconciler) runParkedHardRefreshAction(chg *gitopsv1alpha1.
 		return
 	}
 
-	// Rule 4: Size Limit Discipline - Capped inline logs (max 20 lines / 2KB) to stay well under etcd limits (1.5MB)
-	tailLogs := []string{
-		fmt.Sprintf("%s - [SIMULATED] WARN: ImagePullBackOff on container %s-api", now.Format(time.RFC3339), appName),
-		fmt.Sprintf("%s - [SIMULATED] ERROR: Connection timeout connecting to registry.internal", now.Format(time.RFC3339)),
-	}
-	if len(tailLogs) > 20 {
-		tailLogs = tailLogs[len(tailLogs)-20:]
-	}
-
 	nexusBaseURL := chg.Spec.EvidenceRepoURL
 	if nexusBaseURL == "" {
 		nexusBaseURL = os.Getenv("NEXUS_RAW_REPO_URL")
 	}
-	if nexusBaseURL == "" {
-		nexusBaseURL = "https://nexus.company.com:8081/repository/gitops-evidence"
-	}
 
-	logRef := fmt.Sprintf("%s/%s/%s-%s-attempt-%d.log", strings.TrimSuffix(nexusBaseURL, "/"), chg.Spec.CHGNumber, cs.ClusterName, appName, action.Attempts+1)
+	logRef := ""
+	if nexusBaseURL != "" {
+		logRef = fmt.Sprintf("%s/%s/%s-%s-attempt-%d.log", strings.TrimSuffix(nexusBaseURL, "/"), chg.Spec.CHGNumber, cs.ClusterName, appName, action.Attempts+1)
+	}
 
 	action.Attempts++
 	action.LastAttemptAt = metav1.NewTime(now)
@@ -308,72 +498,11 @@ func (r *ChangeWindowReconciler) runParkedHardRefreshAction(chg *gitopsv1alpha1.
 		TriggeredAt:   metav1.NewTime(now),
 		TriggerResult: "Parked (Execution disabled in operator config)",
 		LogRef:        logRef,
-		LogSummary:    fmt.Sprintf("SIMULATED (stub - live pod log query pending): ImagePullBackOff on %s in cluster %s", appName, cs.ClusterName),
-		TailLogs:      tailLogs,
+		LogSummary:    fmt.Sprintf("Parked hard refresh action evaluated for %s on cluster %s", appName, cs.ClusterName),
+		TailLogs:      nil,
 	})
 
 	chg.Status.Actions[key] = action
-}
-
-func (r *ChangeWindowReconciler) buildIssuesList(chg *gitopsv1alpha1.ChangeWindow) []string {
-	var issues []string
-	for appName, appStateMap := range chg.Status.AppStates {
-		for _, cs := range appStateMap.ClusterStates {
-			// State / sync divergence
-			if cs.State == "Diverged" || cs.State == "OutOfSync" {
-				issues = append(issues, fmt.Sprintf("%s/%s: local drift (OutOfSync)", appName, cs.ClusterName))
-			} else if cs.State == "Lagging" {
-				issues = append(issues, fmt.Sprintf("%s/%s: observed revision %s trailing expected %s",
-					appName, cs.ClusterName, cs.ObservedRevision, chg.Spec.ExpectedRevision))
-			}
-			// Health
-			if cs.Health != "Healthy" && cs.Health != "" {
-				issues = append(issues, fmt.Sprintf("%s/%s: post-health check failed (Health = %s)",
-					appName, cs.ClusterName, cs.Health))
-			}
-			// MCP rollout
-			if cs.MCPStatus.UpdatingNodeCount > 0 {
-				issues = append(issues, fmt.Sprintf("%s/%s: MachineConfigPool %s still updating %d node(s)",
-					appName, cs.ClusterName, cs.MCPStatus.Name, cs.MCPStatus.UpdatingNodeCount))
-			}
-			if cs.MCPStatus.DegradedNodeCount > 0 {
-				issues = append(issues, fmt.Sprintf("%s/%s: MachineConfigPool %s has %d degraded node(s)",
-					appName, cs.ClusterName, cs.MCPStatus.Name, cs.MCPStatus.DegradedNodeCount))
-			}
-			// Warning events
-			for _, ev := range cs.RecentEvents {
-				issues = append(issues, fmt.Sprintf("%s/%s: Warning event %s on %s (×%d): %s",
-					appName, cs.ClusterName, ev.Reason, ev.InvolvedObject, ev.Count, ev.Message))
-			}
-			// Failed object changes
-			for _, oc := range cs.ObjectChanges {
-				if oc.ChangeType == "Failed" {
-					issues = append(issues, fmt.Sprintf("%s/%s: ArgoCD resource %s/%s failed to sync",
-						appName, cs.ClusterName, oc.Kind, oc.Name))
-				}
-			}
-			// Unready dependencies
-			for _, dep := range cs.Dependencies {
-				if !dep.Ready {
-					note := dep.Note
-					if note != "" {
-						note = " (" + note + ")"
-					}
-					issues = append(issues, fmt.Sprintf("%s/%s: dependency %s/%s not ready%s",
-						appName, cs.ClusterName, dep.Kind, dep.Name, note))
-				}
-			}
-
-		}
-	}
-	for _, s := range chg.Status.SilentClusters {
-		if s.State == "WentSilentDuringChg" {
-			issues = append(issues, fmt.Sprintf("%s/%s: agent stopped reporting after CHG start", s.App, s.Cluster))
-		} else {
-			issues = append(issues, fmt.Sprintf("%s/%s: agent was silent before CHG start", s.App, s.Cluster))
-		}
-	}
-	return issues
 }
 
 func (r *ChangeWindowReconciler) BuildKafkaReportJSON(chg *gitopsv1alpha1.ChangeWindow, now time.Time) ([]byte, error) {
@@ -431,7 +560,6 @@ func (r *ChangeWindowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gitopsv1alpha1.ChangeWindow{}).
 		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 5}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
 			&gitopsv1alpha1.PropagationStatus{},
 			handler.EnqueueRequestsFromMapFunc(r.mapPropagationStatusToChangeWindow),

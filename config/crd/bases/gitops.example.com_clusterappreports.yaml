@@ -101,15 +101,11 @@ spec:
                       name: { type: string }
                       ready: { type: boolean }
                       note: { type: string }
-                vmStatus:
-                  type: array
-                  items:
-                    type: object
-                    required: ["name", "ready", "liveMigratable", "restartRequired", "dataVolumesBound"]
-                    properties:
-                      name: { type: string }
-                      ready: { type: boolean }
-                      liveMigratable: { type: boolean }
-                      restartRequired: { type: boolean }
-                      dataVolumesBound: { type: boolean }
-                      activeMigration: { type: string }
+                virtStatus:
+                  type: object
+                  properties:
+                    hyperConvergedHealth: { type: string }
+                    virtHandlerReady: { type: boolean }
+                    activeMigrations: { type: integer }
+                    stalledMigrations: { type: integer }
+                    unmigratableVMIs: { type: integer }

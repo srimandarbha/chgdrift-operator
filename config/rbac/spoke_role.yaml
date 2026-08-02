@@ -9,8 +9,7 @@ kind: ClusterRole
 metadata:
   name: drift-operator-spoke-role
 rules:
-  # App descriptor ConfigMaps -- read-only is enough; nothing writes these
-  # from the operator side.
+  # App descriptor ConfigMaps -- read-only is enough
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
@@ -28,12 +27,12 @@ rules:
     resources: ["pods/log"]
     verbs: ["get"]
 
-  # Dependency checks (ConfigMap already covered above).
+  # Dependency checks
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch"]
 
-  # ClusterAppReport is the only thing this SA is allowed to write.
+  # ClusterAppReport is written by spoke SA.
   - apiGroups: ["gitops.example.com"]
     resources: ["clusterappreports"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
@@ -41,6 +40,16 @@ rules:
   # MachineConfigPool is cluster-scoped.
   - apiGroups: ["machineconfiguration.openshift.io"]
     resources: ["machineconfigpools"]
+    verbs: ["get", "list", "watch"]
+
+  # CDI DataVolume checks for virtualization dependency resolution.
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["datavolumes"]
+    verbs: ["get", "list", "watch"]
+
+  # OpenShift Virtualization HyperConverged health check.
+  - apiGroups: ["hco.kubevirt.io"]
+    resources: ["hyperconvergeds"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

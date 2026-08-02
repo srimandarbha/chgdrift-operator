@@ -42,19 +42,6 @@ const (
 // data, and writes a ClusterAppReport that the hub's PropagationStatusReconciler
 // reads.
 //
-// Design note: rather than taking a hard dependency on ArgoCD or Flux Go modules
-// (which would inflate go.mod significantly), this controller uses a plain
-// corev1.ConfigMap as a lightweight "app descriptor" CRD substitute. The
-// ConfigMap carries labels and annotations that identify the app name, expected
-// revision, ArgoCD namespace, and ArgoCD Application name.  In a production
-// deployment a separate side-car or the spoke's ArgoCD agent populates these
-// ConfigMaps from Application.status fields.
-//
-// OpenShift Virtualization resources (VirtualMachine, VirtualMachineInstance,
-// VirtualMachineInstanceMigration, DataVolume) are accessed via the dynamic
-// unstructured client to avoid importing kubevirt.io/api, which brings in a
-// very large dependency tree.
-//
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -125,9 +112,10 @@ func (r *LocalAppWatchReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		spec.Dependencies = r.checkDependencies(ctx, desc.Namespace, &cm)
 	}
 
-	// MCP status is cheap (a single unstructured Get/List).
+	// MCP and Virt status are collected on each reconcile.
 	mcpPool := cm.Labels["gitops.example.com/mcp-pool"]
 	spec.MCPStatus = r.readMachineConfigPool(ctx, mcpPool)
+	spec.VirtStatus = r.readVirtualizationStatus(ctx)
 
 	if err := r.upsertReport(ctx, reportName, spec); err != nil {
 		if apierrors.IsConflict(err) {
@@ -149,7 +137,6 @@ func (r *LocalAppWatchReconciler) collectWarningEvents(ctx context.Context, name
 		return nil
 	}
 
-	// Group by (Reason, InvolvedObject) and keep the most severe.
 	type key struct{ Reason, Object string }
 	grouped := make(map[key]*gitopsv1alpha1.EventSummary)
 
@@ -179,7 +166,6 @@ func (r *LocalAppWatchReconciler) collectWarningEvents(ctx context.Context, name
 		}
 	}
 
-	// Sort by count descending and cap to maxWarningEvents.
 	results := make([]gitopsv1alpha1.EventSummary, 0, len(grouped))
 	for _, v := range grouped {
 		results = append(results, *v)
@@ -211,7 +197,6 @@ func (r *LocalAppWatchReconciler) collectPodLogs(ctx context.Context, namespace,
 		return nil
 	}
 
-	// Fallback to app.kubernetes.io/name selector if app: appName returned zero pods
 	if len(podList.Items) == 0 {
 		_ = r.List(ctx, &podList,
 			client.InNamespace(namespace),
@@ -223,7 +208,6 @@ func (r *LocalAppWatchReconciler) collectPodLogs(ctx context.Context, namespace,
 	var lines []string
 	for i := range podList.Items {
 		pod := &podList.Items[i]
-		// Only tail logs for pods that are not fully Ready.
 		if isPodReady(pod) {
 			continue
 		}
@@ -253,8 +237,8 @@ func (r *LocalAppWatchReconciler) collectPodLogs(ctx context.Context, namespace,
 }
 
 func isPodReady(pod *corev1.Pod) bool {
-	for _, c := range pod.Status.Conditions {
-		if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
 			return true
 		}
 	}
@@ -262,49 +246,66 @@ func isPodReady(pod *corev1.Pod) bool {
 }
 
 // -------------------------------------------------------------------------
-// Object changes (from a ConfigMap annotation written by an ArgoCD post-sync hook)
+// Object change extraction
 // -------------------------------------------------------------------------
 
-// objectChangesFromAnnotation reads a JSON annotation that an ArgoCD post-sync
-// hook or a side-car writes to the descriptor ConfigMap.  The format matches
-// ObjectChangeSummary so no additional parsing is needed in normal operation.
-// When the annotation is absent (steady state), an empty slice is returned.
 func (r *LocalAppWatchReconciler) objectChangesFromAnnotation(cm *corev1.ConfigMap) []gitopsv1alpha1.ObjectChangeSummary {
-	const annotationKey = "gitops.example.com/last-sync-resources"
-	raw, ok := cm.Annotations[annotationKey]
+	const syncResourcesAnno = "gitops.example.com/last-sync-resources"
+	raw, ok := cm.Annotations[syncResourcesAnno]
 	if !ok || raw == "" {
 		return nil
 	}
-	// Parse line format: "Kind/Name=changeType[:field1,field2]"
+
 	var results []gitopsv1alpha1.ObjectChangeSummary
 	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		kindName := strings.SplitN(parts[0], "/", 2)
-		if len(kindName) != 2 {
-			continue
+
+		var kind, name, changeType, fieldsStr string
+
+		if strings.Contains(line, "|") {
+			parts := strings.Split(line, "|")
+			if len(parts) >= 3 {
+				kind, name, changeType = parts[0], parts[1], parts[2]
+				if len(parts) >= 4 {
+					fieldsStr = parts[3]
+				}
+			}
+		} else if strings.Contains(line, "=") && strings.Contains(line, "/") {
+			// Format: "Kind/Name=ChangeType:field1,field2"
+			eqParts := strings.SplitN(line, "=", 2)
+			knParts := strings.SplitN(eqParts[0], "/", 2)
+			if len(knParts) == 2 {
+				kind, name = knParts[0], knParts[1]
+			}
+			if len(eqParts) == 2 {
+				ctParts := strings.SplitN(eqParts[1], ":", 2)
+				changeType = ctParts[0]
+				if len(ctParts) == 2 {
+					fieldsStr = ctParts[1]
+				}
+			}
 		}
-		changeParts := strings.SplitN(parts[1], ":", 2)
-		changeType := changeParts[0]
-		var changedFields []string
-		if len(changeParts) > 1 && changeParts[1] != "" {
-			changedFields = strings.Split(changeParts[1], ",")
+
+		if kind != "" && name != "" {
+			oc := gitopsv1alpha1.ObjectChangeSummary{
+				Kind:       kind,
+				Name:       name,
+				ChangeType: changeType,
+			}
+			if fieldsStr != "" {
+				oc.ChangedFields = strings.Split(fieldsStr, ",")
+			}
+			results = append(results, oc)
 		}
-		oc := gitopsv1alpha1.ObjectChangeSummary{
-			Kind:          kindName[0],
-			Name:          kindName[1],
-			ChangeType:    changeType,
-			ChangedFields: changedFields,
-		}
-		results = append(results, oc)
 	}
 	return results
 }
 
 // -------------------------------------------------------------------------
-// Dependency checking
+// Dependency checking (Fail-closed)
 // -------------------------------------------------------------------------
 
 func (r *LocalAppWatchReconciler) checkDependencies(ctx context.Context, namespace string, cm *corev1.ConfigMap) []gitopsv1alpha1.DependencyRef {
@@ -314,7 +315,6 @@ func (r *LocalAppWatchReconciler) checkDependencies(ctx context.Context, namespa
 		return nil
 	}
 
-	// Format: "Kind/Name\nKind/Name\n…"
 	var results []gitopsv1alpha1.DependencyRef
 	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), "/", 2)
@@ -334,7 +334,8 @@ func (r *LocalAppWatchReconciler) checkDependencies(ctx context.Context, namespa
 		case "DataVolume":
 			dep.Ready = r.isDataVolumeReady(ctx, namespace, name)
 		default:
-			dep.Ready = true // Unknown kind; assume ready rather than false-alerting.
+			// Fail-closed on unknown dependency kinds
+			dep.Ready = false
 			dep.Note = fmt.Sprintf("readiness check not implemented for kind %s", kind)
 		}
 		results = append(results, dep)
@@ -342,8 +343,6 @@ func (r *LocalAppWatchReconciler) checkDependencies(ctx context.Context, namespa
 	return results
 }
 
-// isDataVolumeReady checks whether a CDI DataVolume's phase is "Succeeded".
-// Uses the unstructured client to avoid a CDI Go module dependency.
 func (r *LocalAppWatchReconciler) isDataVolumeReady(ctx context.Context, namespace, name string) bool {
 	dv := &unstructured.Unstructured{}
 	dv.SetGroupVersionKind(schema.GroupVersionKind{
@@ -359,17 +358,30 @@ func (r *LocalAppWatchReconciler) isDataVolumeReady(ctx context.Context, namespa
 }
 
 // -------------------------------------------------------------------------
-// MachineConfigPool
+// MachineConfigPool & Virtualization Status
 // -------------------------------------------------------------------------
 
-// readMachineConfigPool reads the MachineConfigPool status for preferredPool,
-// "virt", or "worker" pool. Uses unstructured client to avoid importing MCO SDK.
 func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, preferredPool string) gitopsv1alpha1.MachineConfigPoolStatus {
-	poolsToTry := []string{}
-	if preferredPool != "" {
-		poolsToTry = append(poolsToTry, preferredPool)
+	poolName := preferredPool
+	if poolName == "" {
+		for _, tryName := range []string{"virt-worker", "virt", "worker"} {
+			mcp := &unstructured.Unstructured{}
+			mcp.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "machineconfiguration.openshift.io",
+				Version: "v1",
+				Kind:    "MachineConfigPool",
+			})
+			if err := r.Get(ctx, types.NamespacedName{Name: tryName}, mcp); err == nil {
+				poolName = tryName
+				break
+			}
+		}
 	}
-	poolsToTry = append(poolsToTry, "virt", "worker")
+	if poolName == "" {
+		return gitopsv1alpha1.MachineConfigPoolStatus{
+			Phase: "Unknown",
+		}
+	}
 
 	mcp := &unstructured.Unstructured{}
 	mcp.SetGroupVersionKind(schema.GroupVersionKind{
@@ -377,25 +389,23 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, pre
 		Version: "v1",
 		Kind:    "MachineConfigPool",
 	})
-
-	var targetPool string
-	for _, poolName := range poolsToTry {
-		if err := r.Get(ctx, types.NamespacedName{Name: poolName}, mcp); err == nil {
-			targetPool = poolName
-			break
+	if err := r.Get(ctx, types.NamespacedName{Name: poolName}, mcp); err != nil {
+		return gitopsv1alpha1.MachineConfigPoolStatus{
+			Name:  poolName,
+			Phase: "Unknown",
 		}
-	}
-	if targetPool == "" {
-		return gitopsv1alpha1.MachineConfigPoolStatus{}
 	}
 
 	machineCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "machineCount")
+	readyCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "readyMachineCount")
 	updatedCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "updatedMachineCount")
 	updatingCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "unavailableMachineCount")
 	degradedCount, _, _ := unstructured.NestedInt64(mcp.Object, "status", "degradedMachineCount")
+	currentConfig, _, _ := unstructured.NestedString(mcp.Object, "status", "configuration", "name")
+	desiredConfig, _, _ := unstructured.NestedString(mcp.Object, "spec", "configuration", "name")
 
 	phase := "Updated"
-	if updatingCount > 0 {
+	if updatingCount > 0 || readyCount < machineCount {
 		phase = "Updating"
 	}
 	if degradedCount > 0 {
@@ -403,13 +413,48 @@ func (r *LocalAppWatchReconciler) readMachineConfigPool(ctx context.Context, pre
 	}
 
 	return gitopsv1alpha1.MachineConfigPoolStatus{
-		Name:              targetPool,
-		MachineCount:      int32(machineCount),
-		UpdatedNodeCount:  int32(updatedCount),
-		UpdatingNodeCount: int32(updatingCount),
-		DegradedNodeCount: int32(degradedCount),
-		Phase:             phase,
+		Name:                  poolName,
+		MachineCount:          int32(machineCount),
+		ReadyMachineCount:     int32(readyCount),
+		UpdatedNodeCount:      int32(updatedCount),
+		UpdatingNodeCount:     int32(updatingCount),
+		DegradedNodeCount:     int32(degradedCount),
+		CurrentRenderedConfig: currentConfig,
+		DesiredRenderedConfig: desiredConfig,
+		Phase:                 phase,
 	}
+}
+
+func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context) gitopsv1alpha1.VirtualizationImpactStatus {
+	status := gitopsv1alpha1.VirtualizationImpactStatus{
+		HyperConvergedHealth: "Healthy",
+		VirtHandlerReady:     true,
+	}
+
+	hco := &unstructured.Unstructured{}
+	hco.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "hco.kubevirt.io",
+		Version: "v1beta1",
+		Kind:    "HyperConverged",
+	})
+	if err := r.Get(ctx, types.NamespacedName{Namespace: "openshift-cnv", Name: "kubevirt-hyperconverged"}, hco); err == nil {
+		conditions, found, _ := unstructured.NestedSlice(hco.Object, "status", "conditions")
+		if found {
+			for _, condRaw := range conditions {
+				cond, ok := condRaw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				cType, _ := cond["type"].(string)
+				cStatus, _ := cond["status"].(string)
+				if cType == "Degraded" && cStatus == "True" {
+					status.HyperConvergedHealth = "Degraded"
+				}
+			}
+		}
+	}
+
+	return status
 }
 
 // -------------------------------------------------------------------------
@@ -436,8 +481,6 @@ func (r *LocalAppWatchReconciler) upsertReport(ctx context.Context, name string,
 		return err
 	}
 
-	// Update the existing report's spec with the latest snapshot.
-	// Use DeepCopy to avoid mutating the cached object.
 	updated := existing.DeepCopy()
 	updated.Spec = spec
 	return r.Patch(ctx, updated, client.MergeFrom(existing))
@@ -464,7 +507,6 @@ func parseDescriptor(cm *corev1.ConfigMap) AppDescriptor {
 
 func (r *LocalAppWatchReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		// Watch ConfigMaps labelled as app descriptors.
 		For(&corev1.ConfigMap{}).
 		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 			return obj.GetLabels()[AppLabelKey] != ""

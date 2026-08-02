@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"example.com/drift-operator/internal/kafka"
@@ -28,6 +29,11 @@ func SetupAllControllers(mgr ctrl.Manager, kafkaBridge *kafka.KafkaBridge) error
 	var controllers []reg
 
 	if clusterName != "" {
+		clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+		if err != nil {
+			return fmt.Errorf("unable to create typed kubernetes clientset for spoke reconciler: %w", err)
+		}
+
 		// Spoke deployment mode: run ONLY the spoke-side telemetry controller.
 		controllers = []reg{
 			{
@@ -35,6 +41,7 @@ func SetupAllControllers(mgr ctrl.Manager, kafkaBridge *kafka.KafkaBridge) error
 				controller: &LocalAppWatchReconciler{
 					Client:      mgr.GetClient(),
 					ClusterName: clusterName,
+					Clientset:   clientset,
 				},
 			},
 		}

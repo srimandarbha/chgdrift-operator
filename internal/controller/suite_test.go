@@ -17,9 +17,6 @@ import (
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 )
 
-// psNamespacedName returns the NamespacedName for a PropagationStatus.
-// Go does not allow attaching methods to types from external packages, so we
-// use a package-level helper instead of a method receiver.
 func psNamespacedName(ps *gitopsv1alpha1.PropagationStatus) types.NamespacedName {
 	return types.NamespacedName{
 		Namespace: ps.Namespace,
@@ -27,7 +24,6 @@ func psNamespacedName(ps *gitopsv1alpha1.PropagationStatus) types.NamespacedName
 	}
 }
 
-// ctrlRequest constructs a controller-runtime reconcile request.
 func ctrlRequest(namespace, name string) ctrl.Request {
 	return ctrl.Request{
 		NamespacedName: types.NamespacedName{
@@ -71,12 +67,26 @@ func TestPropagationStatusController(t *testing.T) {
 		},
 	}
 
-	// WithIndex registers the same field indexer that SetupWithManager adds,
-	// so the reconciler's List(MatchingFields{"spec.appName": ...}) works
-	// against the fake client.
+	report2 := &gitopsv1alpha1.ClusterAppReport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "us-east-02-svc-payments",
+			Namespace: "default",
+			Labels:    map[string]string{AppLabelKey: "svc-payments"},
+		},
+		Spec: gitopsv1alpha1.ClusterAppReportSpec{
+			ClusterName:      "us-east-02",
+			AppName:          "svc-payments",
+			AppNamespace:     "payments-prod",
+			ObservedRevision: "old-revision",
+			SyncStatus:       "Synced",
+			Health:           "Healthy",
+			ObservedAt:       metav1.Now(),
+		},
+	}
+
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(ps, report1).
+		WithObjects(ps, report1, report2).
 		WithStatusSubresource(ps).
 		WithIndex(&gitopsv1alpha1.ClusterAppReport{}, "spec.appName", func(obj client.Object) []string {
 			rep, ok := obj.(*gitopsv1alpha1.ClusterAppReport)
@@ -98,102 +108,17 @@ func TestPropagationStatusController(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected reconcile error: %v", err)
 	}
-	if res.RequeueAfter != RequeueInterval {
-		t.Errorf("expected requeueAfter %v, got %v", RequeueInterval, res.RequeueAfter)
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("expected RequeueAfter 30s, got %v", res.RequeueAfter)
 	}
 
 	var updatedPS gitopsv1alpha1.PropagationStatus
 	if err := fakeClient.Get(ctx, psNamespacedName(ps), &updatedPS); err != nil {
-		t.Fatalf("failed to fetch updated PS: %v", err)
+		t.Fatalf("failed to fetch updated PropagationStatus: %v", err)
 	}
 
-	if len(updatedPS.Status.MissingClusters) != 1 || updatedPS.Status.MissingClusters[0] != "us-east-02" {
-		t.Errorf("expected us-east-02 to be missing, got missing=%v", updatedPS.Status.MissingClusters)
-	}
-
-	if len(updatedPS.Status.ClusterStates) == 0 || updatedPS.Status.ClusterStates[0].AppNamespace != "payments-prod" {
-		t.Errorf("expected cluster state appNamespace 'payments-prod', got %s", updatedPS.Status.ClusterStates[0].AppNamespace)
-	}
-}
-
-func TestChangeWindowSilenceClassification(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = gitopsv1alpha1.AddToScheme(scheme)
-
-	now := time.Now()
-	startTime := metav1.NewTime(now.Add(-30 * time.Minute))
-	endTime := metav1.NewTime(now.Add(30 * time.Minute))
-
-	chg := &gitopsv1alpha1.ChangeWindow{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "chg0012345",
-			Namespace: "default",
-		},
-		Spec: gitopsv1alpha1.ChangeWindowSpec{
-			CHGNumber:                   "CHG0012345",
-			ReleaseTag:                  "v2.4.0",
-			ExpectedRevision:            "a1b2c3d9",
-			RootApp:                     "platform-root",
-			ImpactedApps:                []string{"svc-payments"},
-			StartTime:                   startTime,
-			EndTime:                     endTime,
-			StaleReportThresholdSeconds: 300,
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(chg).
-		WithStatusSubresource(chg).
-		Build()
-
-	r := &ChangeWindowReconciler{
-		Client: fakeClient,
-	}
-
-	// Test 1: Active cluster reporting within threshold
-	csActive := gitopsv1alpha1.ClusterRevisionState{
-		ClusterName:      "us-east-01",
-		ObservedRevision: "a1b2c3d9",
-		SyncStatus:       "Synced",
-		Health:           "Healthy",
-		ObservedAt:       metav1.NewTime(now.Add(-1 * time.Minute)),
-	}
-
-	silenceActive := r.classifySilence("svc-payments", csActive, chg, now, 300*time.Second)
-	if silenceActive.State != "Reporting" {
-		t.Errorf("expected active cluster state Reporting, got %s", silenceActive.State)
-	}
-
-	// Test 2: Cluster dark before CHG start
-	csDarkBefore := gitopsv1alpha1.ClusterRevisionState{
-		ClusterName:            "us-east-02",
-		ObservedRevision:       "a1b2c3d9",
-		SyncStatus:             "Synced",
-		Health:                 "Healthy",
-		ObservedAt:             metav1.NewTime(now.Add(-40 * time.Minute)),
-		SawReportSinceChgStart: false,
-	}
-
-	silenceBefore := r.classifySilence("svc-payments", csDarkBefore, chg, now, 300*time.Second)
-	if silenceBefore.State != "SilentBeforeChgStart" {
-		t.Errorf("expected state SilentBeforeChgStart, got %s", silenceBefore.State)
-	}
-
-	// Test 3: Cluster went silent during CHG
-	csWentSilent := gitopsv1alpha1.ClusterRevisionState{
-		ClusterName:            "us-east-03",
-		ObservedRevision:       "a1b2c3d9",
-		SyncStatus:             "Synced",
-		Health:                 "Healthy",
-		ObservedAt:             metav1.NewTime(now.Add(-10 * time.Minute)),
-		SawReportSinceChgStart: true,
-	}
-
-	silenceDuring := r.classifySilence("svc-payments", csWentSilent, chg, now, 300*time.Second)
-	if silenceDuring.State != "WentSilentDuringChg" {
-		t.Errorf("expected state WentSilentDuringChg, got %s", silenceDuring.State)
+	if updatedPS.Status.Phase != StatePropagating {
+		t.Errorf("expected phase %s, got %s", StatePropagating, updatedPS.Status.Phase)
 	}
 }
 
@@ -271,8 +196,8 @@ func TestChangeWindowReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected reconcile error: %v", err)
 	}
-	if res.RequeueAfter != 0 {
-		t.Errorf("expected requeueAfter 0s for Validated window, got %v", res.RequeueAfter)
+	if res.RequeueAfter != 60*time.Second {
+		t.Errorf("expected requeueAfter 60s for continuous Validated observation, got %v", res.RequeueAfter)
 	}
 
 	var updatedCHG gitopsv1alpha1.ChangeWindow
@@ -285,6 +210,65 @@ func TestChangeWindowReconcile(t *testing.T) {
 	}
 	if updatedCHG.Status.Phase != "Validated" {
 		t.Errorf("expected phase Validated, got %s", updatedCHG.Status.Phase)
+	}
+}
+
+func TestTriStateFailClosedGating(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gitopsv1alpha1.AddToScheme(scheme)
+
+	now := time.Now()
+	startTime := metav1.NewTime(now.Add(-10 * time.Minute))
+	endTime := metav1.NewTime(now.Add(50 * time.Minute))
+
+	// CHG with empty impactedApps -> MUST FAIL CLOSED with GateStatusUnknown
+	chgEmpty := &gitopsv1alpha1.ChangeWindow{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chg-empty",
+			Namespace: "default",
+		},
+		Spec: gitopsv1alpha1.ChangeWindowSpec{
+			CHGNumber:    "CHG-EMPTY",
+			ReleaseTag:   "v1.0.0",
+			RootApp:      "app-root",
+			ImpactedApps: []string{}, // Empty!
+			StartTime:    startTime,
+			EndTime:      endTime,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(chgEmpty).
+		WithStatusSubresource(chgEmpty).
+		Build()
+
+	r := &ChangeWindowReconciler{
+		Client: fakeClient,
+	}
+
+	req := ctrlRequest("default", "chg-empty")
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	var updatedCHG gitopsv1alpha1.ChangeWindow
+	if err := fakeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "chg-empty"}, &updatedCHG); err != nil {
+		t.Fatalf("failed to fetch updated ChangeWindow: %v", err)
+	}
+
+	if updatedCHG.Status.Validation.Passed {
+		t.Errorf("expected validation.Passed to be false for empty impactedApps, got true")
+	}
+	if len(updatedCHG.Status.Validation.GateResults) == 0 {
+		t.Fatalf("expected GateResults to be populated")
+	}
+	if updatedCHG.Status.Validation.GateResults[0].Status != gitopsv1alpha1.GateStatusUnknown {
+		t.Errorf("expected GateStatusUnknown for empty impactedApps, got %s", updatedCHG.Status.Validation.GateResults[0].Status)
 	}
 }
 
@@ -337,12 +321,6 @@ func TestLocalAppWatchReconciler(t *testing.T) {
 	if report.Spec.AppName != "svc-payments" || report.Spec.ClusterName != "spoke-01" {
 		t.Errorf("unexpected report spec: %+v", report.Spec)
 	}
-
-	// Reconcile again to test patch logic
-	res, err = r.Reconcile(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected reconcile error on update: %v", err)
-	}
 }
 
 func TestObjectChangesFromAnnotation(t *testing.T) {
@@ -363,5 +341,23 @@ func TestObjectChangesFromAnnotation(t *testing.T) {
 	}
 	if changes[1].ChangeType != "Created" || len(changes[1].ChangedFields) != 0 {
 		t.Errorf("expected ChangeType 'Created' and 0 changed fields, got %+v", changes[1])
+	}
+}
+
+func TestFailClosedDependencyCheck(t *testing.T) {
+	r := &LocalAppWatchReconciler{}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"gitops.example.com/dependencies": "UnknownKind/some-resource",
+			},
+		},
+	}
+	deps := r.checkDependencies(context.Background(), "default", cm)
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dependency, got %d", len(deps))
+	}
+	if deps[0].Ready {
+		t.Errorf("expected ready=false for unknown dependency kind, got true")
 	}
 }

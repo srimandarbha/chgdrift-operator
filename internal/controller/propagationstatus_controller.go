@@ -17,7 +17,6 @@ import (
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 	"example.com/drift-operator/internal/metrics"
@@ -133,9 +132,9 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		case rep.Spec.ObservedRevision != ps.Spec.ExpectedRevision:
 			since := now.Sub(ps.Status.ExpectedRevisionSince.Time)
 			lagSeconds = since.Seconds()
+			lagging = append(lagging, clusterName)
 			if since > lagThreshold {
 				state = StateLagging
-				lagging = append(lagging, clusterName)
 			} else {
 				state = StatePropagating
 			}
@@ -152,12 +151,11 @@ func (r *PropagationStatusReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			Health:           rep.Spec.Health,
 			ObservedAt:       rep.Spec.ObservedAt,
 			MCPStatus:        rep.Spec.MCPStatus,
+			VirtStatus:       rep.Spec.VirtStatus,
 			State:            state,
-			// Relay spoke-collected observability data to the hub validation gate.
-			VMStatus:      rep.Spec.VMStatus,
-			RecentEvents:  rep.Spec.RecentEvents,
-			ObjectChanges: rep.Spec.ObjectChanges,
-			Dependencies:  rep.Spec.Dependencies,
+			RecentEvents:     rep.Spec.RecentEvents,
+			ObjectChanges:    rep.Spec.ObjectChanges,
+			Dependencies:     rep.Spec.Dependencies,
 		})
 		metrics.RecordClusterMetrics(ps.Spec.AppName, clusterName, state, state == StateInSync, lagSeconds, reportAge.Seconds())
 	}
@@ -239,75 +237,57 @@ func emitTransitionEvent(rec record.EventRecorder, ps *gitopsv1alpha1.Propagatio
 	case "Stale":
 		rec.Eventf(ps, corev1.EventTypeWarning, "StaleReports", "%d stale, %d missing agent report(s): stale=%v missing=%v", len(stale), len(missing), stale, missing)
 	case "Propagating":
-		rec.Eventf(ps, corev1.EventTypeNormal, "Propagating", "%d cluster(s) still catching up: %v", len(lagging), lagging)
+		rec.Eventf(ps, corev1.EventTypeNormal, "Propagating", "%d cluster(s) propagating expected revision: %v", len(lagging), lagging)
 	case "Synced":
-		rec.Event(ps, corev1.EventTypeNormal, "Synced", "all target clusters converged on expected revision")
+		rec.Eventf(ps, corev1.EventTypeNormal, "Synced", "All target clusters converged to expected revision")
 	}
 }
 
-func orDefault(v int32, def int32) int32 {
-	if v == 0 {
+func orDefault(val, def int32) int32 {
+	if val <= 0 {
 		return def
 	}
-	return v
-}
-
-func (r *PropagationStatusReconciler) mapReportToPropagationStatus(ctx context.Context, obj client.Object) []ctrl.Request {
-	rep, ok := obj.(*gitopsv1alpha1.ClusterAppReport)
-	if !ok || rep.Spec.AppName == "" {
-		return nil
-	}
-	var psList gitopsv1alpha1.PropagationStatusList
-	if err := r.List(ctx, &psList, client.InNamespace(rep.Namespace), client.MatchingFields{"spec.appName": rep.Spec.AppName}); err == nil && len(psList.Items) > 0 {
-		var reqs []ctrl.Request
-		for _, ps := range psList.Items {
-			reqs = append(reqs, ctrl.Request{
-				NamespacedName: types.NamespacedName{
-					Namespace: ps.Namespace,
-					Name:      ps.Name,
-				},
-			})
-		}
-		return reqs
-	}
-
-	return []ctrl.Request{{
-		NamespacedName: types.NamespacedName{
-			Namespace: rep.Namespace,
-			Name:      rep.Spec.AppName,
-		},
-	}}
+	return val
 }
 
 func (r *PropagationStatusReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Rule 5: Register Field Indexers during manager setup
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &gitopsv1alpha1.ClusterAppReport{}, "spec.appName", func(rawObj client.Object) []string {
-		report, ok := rawObj.(*gitopsv1alpha1.ClusterAppReport)
-		if !ok || report.Spec.AppName == "" {
+		rep, ok := rawObj.(*gitopsv1alpha1.ClusterAppReport)
+		if !ok || rep.Spec.AppName == "" {
 			return nil
 		}
-		return []string{report.Spec.AppName}
+		return []string{rep.Spec.AppName}
 	}); err != nil {
 		return fmt.Errorf("indexing spec.appName: %w", err)
-	}
-
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &gitopsv1alpha1.PropagationStatus{}, "spec.appName", func(rawObj client.Object) []string {
-		ps, ok := rawObj.(*gitopsv1alpha1.PropagationStatus)
-		if !ok || ps.Spec.AppName == "" {
-			return nil
-		}
-		return []string{ps.Spec.AppName}
-	}); err != nil {
-		return fmt.Errorf("indexing PropagationStatus spec.appName: %w", err)
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gitopsv1alpha1.PropagationStatus{}).
 		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 5}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Watches(
 			&gitopsv1alpha1.ClusterAppReport{},
-			handler.EnqueueRequestsFromMapFunc(r.mapReportToPropagationStatus),
+			handler.EnqueueRequestsFromMapFunc(r.mapClusterAppReportToPropagationStatus),
 		).
 		Complete(r)
+}
+
+func (r *PropagationStatusReconciler) mapClusterAppReportToPropagationStatus(ctx context.Context, obj client.Object) []ctrl.Request {
+	rep, ok := obj.(*gitopsv1alpha1.ClusterAppReport)
+	if !ok || rep.Spec.AppName == "" {
+		return nil
+	}
+	var psList gitopsv1alpha1.PropagationStatusList
+	if err := r.List(ctx, &psList, client.InNamespace(rep.Namespace), client.MatchingFields{"spec.appName": rep.Spec.AppName}, client.Limit(100)); err != nil {
+		return nil
+	}
+	var reqs []ctrl.Request
+	for _, ps := range psList.Items {
+		reqs = append(reqs, ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: ps.Namespace,
+				Name:      ps.Name,
+			},
+		})
+	}
+	return reqs
 }

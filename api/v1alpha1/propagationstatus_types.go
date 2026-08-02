@@ -49,6 +49,63 @@ type DependencyRef struct {
 
 
 
+// GateStatus represents tri-state gate evaluation: True (Passed), False (Failed), Unknown.
+type GateStatus string
+
+const (
+	GateStatusTrue    GateStatus = "True"
+	GateStatusFalse   GateStatus = "False"
+	GateStatusUnknown GateStatus = "Unknown"
+)
+
+// EvidenceRef references immutable evidence captured during a change window.
+type EvidenceRef struct {
+	Source       string      `json:"source"`
+	URI          string      `json:"uri,omitempty"`
+	SHA256       string      `json:"sha256,omitempty"`
+	CapturedAt   metav1.Time `json:"capturedAt"`
+	WindowStart  metav1.Time `json:"windowStart,omitempty"`
+	WindowEnd    metav1.Time `json:"windowEnd,omitempty"`
+	ContentType  string      `json:"contentType,omitempty"`
+	Query        string      `json:"query,omitempty"`
+	CollectionID string      `json:"collectionID,omitempty"`
+}
+
+// GateResult provides tri-state assessment for an individual validation gate.
+type GateResult struct {
+	Name       string      `json:"name"`
+	Status     GateStatus  `json:"status"` // True | False | Unknown
+	Reason     string      `json:"reason,omitempty"`
+	Message    string      `json:"message,omitempty"`
+	ObservedAt metav1.Time `json:"observedAt"`
+	// +listType=atomic
+	Evidence []EvidenceRef `json:"evidence,omitempty"`
+}
+
+// VirtualizationImpactStatus captures OpenShift Virtualization platform health.
+type VirtualizationImpactStatus struct {
+	HyperConvergedHealth string `json:"hyperConvergedHealth,omitempty"` // Healthy | Degraded | Unknown
+	VirtHandlerReady     bool   `json:"virtHandlerReady,omitempty"`
+	ActiveMigrations     int32  `json:"activeMigrations,omitempty"`
+	StalledMigrations    int32  `json:"stalledMigrations,omitempty"`
+	UnmigratableVMIs     int32  `json:"unmigratableVMIs,omitempty"`
+}
+
+// MachineConfigPoolStatus captures OpenShift MCO pool state.
+type MachineConfigPoolStatus struct {
+	Name                  string             `json:"name,omitempty"` // e.g., worker, master, virt
+	MachineCount          int32              `json:"machineCount,omitempty"`
+	ReadyMachineCount     int32              `json:"readyMachineCount,omitempty"`
+	UpdatedNodeCount      int32              `json:"updatedNodeCount,omitempty"`
+	UpdatingNodeCount     int32              `json:"updatingNodeCount,omitempty"`
+	DegradedNodeCount     int32              `json:"degradedNodeCount,omitempty"`
+	CurrentRenderedConfig string             `json:"currentRenderedConfig,omitempty"`
+	DesiredRenderedConfig string             `json:"desiredRenderedConfig,omitempty"`
+	Paused                bool               `json:"paused,omitempty"`
+	Phase                 string             `json:"phase,omitempty"` // Updated | Updating | Degraded | Unknown
+	Conditions            []metav1.Condition `json:"conditions,omitempty"`
+}
+
 // ----------------------------------------------------------------------------
 // ClusterAppReport: one per (cluster, app). Written ONLY by the agent running
 // in that cluster, using a ServiceAccount scoped to create/update/get on this
@@ -81,6 +138,9 @@ type ClusterAppReportSpec struct {
 
 	// MCPStatus captures MachineConfigPool node rollout state for OpenShift Virtualization.
 	MCPStatus MachineConfigPoolStatus `json:"mcpStatus,omitempty"`
+
+	// VirtStatus captures OpenShift Virtualization platform impact and workload health.
+	VirtStatus VirtualizationImpactStatus `json:"virtStatus,omitempty"`
 
 	// ObservedAt is when the agent captured this snapshot locally.
 	ObservedAt metav1.Time `json:"observedAt"`
@@ -139,27 +199,19 @@ type PropagationStatusSpec struct {
 	RootApp                     string   `json:"rootApp,omitempty"`
 }
 
-type MachineConfigPoolStatus struct {
-	Name              string `json:"name,omitempty"` // e.g., worker, master, virt
-	MachineCount      int32  `json:"machineCount,omitempty"`
-	UpdatedNodeCount  int32  `json:"updatedNodeCount,omitempty"`
-	UpdatingNodeCount int32  `json:"updatingNodeCount,omitempty"`
-	DegradedNodeCount int32  `json:"degradedNodeCount,omitempty"`
-	Phase             string `json:"phase,omitempty"` // Updated | Updating | Degraded
-}
-
 // ClusterRevisionState represents the aggregated state for one cluster within a PropagationStatus.
 // The hub-side aggregator copies observable fields from ClusterAppReport so that
 // ChangeWindowReconciler has a single place to read all per-cluster data.
 type ClusterRevisionState struct {
-	ClusterName            string                  `json:"clusterName"`
-	AppNamespace           string                  `json:"appNamespace,omitempty"`
-	ObservedRevision       string                  `json:"observedRevision,omitempty"`
-	SyncStatus             string                  `json:"syncStatus,omitempty"`
-	Health                 string                  `json:"health,omitempty"`
-	ObservedAt             metav1.Time             `json:"observedAt,omitempty"`
-	SawReportSinceChgStart bool                    `json:"sawReportSinceChgStart,omitempty"`
-	MCPStatus              MachineConfigPoolStatus `json:"mcpStatus,omitempty"`
+	ClusterName            string                     `json:"clusterName"`
+	AppNamespace           string                     `json:"appNamespace,omitempty"`
+	ObservedRevision       string                     `json:"observedRevision,omitempty"`
+	SyncStatus             string                     `json:"syncStatus,omitempty"`
+	Health                 string                     `json:"health,omitempty"`
+	ObservedAt             metav1.Time                `json:"observedAt,omitempty"`
+	SawReportSinceChgStart bool                       `json:"sawReportSinceChgStart,omitempty"`
+	MCPStatus              MachineConfigPoolStatus    `json:"mcpStatus,omitempty"`
+	VirtStatus             VirtualizationImpactStatus `json:"virtStatus,omitempty"`
 	// State summarizes this row: InSync | Lagging | Diverged | Stale | Missing
 	State string `json:"state"`
 
@@ -232,6 +284,7 @@ type ChangeWindowSpec struct {
 	TargetNamespaces            []string          `json:"targetNamespaces,omitempty"`
 	StartTime                   metav1.Time       `json:"startTime"`
 	EndTime                     metav1.Time       `json:"endTime"`
+	StabilizationPeriodSeconds  int32             `json:"stabilizationPeriodSeconds,omitempty"`
 	StaleReportThresholdSeconds int32             `json:"staleReportThresholdSeconds,omitempty"`
 	EvidenceRepoURL             string            `json:"evidenceRepoURL,omitempty"` // e.g., https://nexus.company.com:8081/repository/gitops-evidence
 	HardRefresh                 HardRefreshConfig `json:"hardRefresh,omitempty"`
@@ -267,7 +320,7 @@ type ActionRecord struct {
 }
 
 // ValidationResult captures the outcome of post-CHG validation across all gates.
-// Passed is the logical AND of all boolean gate fields.
+// Passed is true ONLY when every mandatory gate evaluates to True and no gate is Unknown or False.
 type ValidationResult struct {
 	// AllChangesApplied is true when every target cluster is InSync.
 	AllChangesApplied bool `json:"allChangesApplied"`
@@ -281,21 +334,27 @@ type ValidationResult struct {
 	ObjectsConverged bool `json:"objectsConverged"`
 	// DependenciesReady is true when all referenced ConfigMaps/Secrets/DataVolumes are ready.
 	DependenciesReady bool `json:"dependenciesReady"`
+	// VirtImpactPassed is true when OpenShift Virtualization component health and live migration criteria are met.
+	VirtImpactPassed bool `json:"virtImpactPassed"`
+	// GateResults carries structured tri-state (True/False/Unknown) assessment per validation gate.
+	// +listType=atomic
+	GateResults []GateResult `json:"gateResults,omitempty"`
 	// IssuesFound is a human-readable list of the failing checks.
 	// +listType=atomic
 	IssuesFound []string `json:"issuesFound,omitempty"`
-	// Passed is the AND of all gate fields above.
+	// Passed is true only when every mandatory gate is True and zero gates are Unknown/False.
 	Passed bool `json:"passed"`
 }
 
 type ChangeWindowStatus struct {
-	Phase          string                        `json:"phase,omitempty"`
-	OverallStatus  string                        `json:"overallStatus,omitempty"`
-	SilentClusters []SilentClusterState          `json:"silentClusters,omitempty"`
-	Actions        map[string]ActionRecord       `json:"actions,omitempty"`
-	Validation     ValidationResult              `json:"validation,omitempty"`
-	LastReportedAt metav1.Time                   `json:"lastReportedAt,omitempty"`
-	AppStates      map[string]AppClusterStateMap `json:"appStates,omitempty"`
+	Phase                  string                        `json:"phase,omitempty"`
+	OverallStatus          string                        `json:"overallStatus,omitempty"`
+	SilentClusters         []SilentClusterState          `json:"silentClusters,omitempty"`
+	Actions                map[string]ActionRecord       `json:"actions,omitempty"`
+	Validation             ValidationResult              `json:"validation,omitempty"`
+	StabilizationStartedAt *metav1.Time                  `json:"stabilizationStartedAt,omitempty"`
+	LastReportedAt         metav1.Time                   `json:"lastReportedAt,omitempty"`
+	AppStates              map[string]AppClusterStateMap `json:"appStates,omitempty"`
 }
 
 type AppClusterStateMap struct {
