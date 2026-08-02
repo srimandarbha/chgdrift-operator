@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-api-descriptor
+  namespace: default
+  labels:
+    gitops.example.com/app-descriptor: "true"
+    gitops.example.com/app: "payments-api"
+  annotations:
+    gitops.example.com/target-namespaces: "default"
+data:
+  syncStatus: "Synced"
+  health: "Healthy"
+  revision: "rev-100"

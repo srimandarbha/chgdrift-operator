@@ -126,7 +126,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 5. Post-Validation Logic & Maintenance Pipeline (PreChecking -> InProgress -> Stabilizing -> Validated)
-	validationRes, _ := r.evaluateGates(&chg, now)
+	validationRes, _ := r.evaluateGates(ctx, &chg, now)
 	chg.Status.Validation = validationRes
 
 	previousPhase := chg.Status.Phase
@@ -211,7 +211,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow, now time.Time) (gitopsv1alpha1.ValidationResult, []string) {
+func (r *ChangeWindowReconciler) evaluateGates(ctx context.Context, chg *gitopsv1alpha1.ChangeWindow, now time.Time) (gitopsv1alpha1.ValidationResult, []string) {
 	var issues []string
 
 	gateClusterOps := gitopsv1alpha1.GateResult{
@@ -290,12 +290,18 @@ func (r *ChangeWindowReconciler) evaluateGates(chg *gitopsv1alpha1.ChangeWindow,
 	observedAnyMCP := false
 	observedAnyVirt := false
 
+	isHub := r.isHubCluster(ctx)
+
 	for appName, appStateMap := range chg.Status.AppStates {
 		if len(appStateMap.ClusterStates) == 0 {
-			gateAllChanges.Status = gitopsv1alpha1.GateStatusUnknown
-			gateAllChanges.Reason = "MissingAppPropagationStatus"
-			gateAllChanges.Message = fmt.Sprintf("No cluster propagation status found for app %s", appName)
-			issues = append(issues, fmt.Sprintf("%s: missing cluster propagation status", appName))
+			if isHub {
+				log.Log.Info("Hub management cluster has no workload propagation status; applying hub exclusion rule", "app", appName)
+			} else {
+				gateAllChanges.Status = gitopsv1alpha1.GateStatusUnknown
+				gateAllChanges.Reason = "MissingAppPropagationStatus"
+				gateAllChanges.Message = fmt.Sprintf("No cluster propagation status found for app %s", appName)
+				issues = append(issues, fmt.Sprintf("%s: missing cluster propagation status", appName))
+			}
 		}
 
 		for _, cs := range appStateMap.ClusterStates {
@@ -651,4 +657,8 @@ func (r *ChangeWindowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.mapPropagationStatusToChangeWindow),
 		).
 		Complete(r)
+}
+
+func (r *ChangeWindowReconciler) isHubCluster(ctx context.Context) bool {
+	return DetectClusterRole(ctx, r.Client)
 }

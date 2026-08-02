@@ -31,10 +31,11 @@ type KafkaConfig struct {
 }
 
 type KafkaBridge struct {
-	Writer    *kafka.Writer
-	Reader    *kafka.Reader
-	Client    client.Client
-	Namespace string
+	Writer      *kafka.Writer
+	Reader      *kafka.Reader
+	Client      client.Client
+	Namespace   string
+	ClusterName string
 }
 
 func NewKafkaTLSConfig(caCertPath, clientCertPath, clientKeyPath, serverCN string) (*tls.Config, error) {
@@ -111,12 +112,26 @@ func NewKafkaBridge(cfg KafkaConfig, k8sClient client.Client, namespace string) 
 		reader = kafka.NewReader(readerConfig)
 	}
 
+	clusterName := os.Getenv("CLUSTER_NAME")
 	return &KafkaBridge{
-		Writer:    writer,
-		Reader:    reader,
-		Client:    k8sClient,
-		Namespace: namespace,
+		Writer:      writer,
+		Reader:      reader,
+		Client:      k8sClient,
+		Namespace:   namespace,
+		ClusterName: clusterName,
 	}, nil
+}
+
+func isClusterTargeted(clusterName string, targetClusters []string) bool {
+	if clusterName == "" || strings.EqualFold(clusterName, "hub") || len(targetClusters) == 0 {
+		return true
+	}
+	for _, tc := range targetClusters {
+		if tc == "*" || strings.EqualFold(tc, clusterName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (kb *KafkaBridge) ProduceReport(ctx context.Context, chgNumber string, payload []byte) error {
@@ -199,6 +214,15 @@ func (kb *KafkaBridge) Start(ctx context.Context) error {
 				logger.Info("Kafka message missing chgNumber; skipping")
 				if cerr := kb.Reader.CommitMessages(ctx, msg); cerr != nil {
 					logger.Error(cerr, "failed to commit empty Kafka message offset")
+				}
+				continue
+			}
+
+			if !isClusterTargeted(kb.ClusterName, payload.BlastRadius.TargetClusters) {
+				logger.V(1).Info("Local cluster not targeted in CHG blastRadius; skipping ChangeWindow creation",
+					"cluster", kb.ClusterName, "chg", payload.CHGDetails.CHGNumber)
+				if cerr := kb.Reader.CommitMessages(ctx, msg); cerr != nil {
+					logger.Error(cerr, "failed to commit offset for untargeted CHG event")
 				}
 				continue
 			}
