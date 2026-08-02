@@ -29,16 +29,23 @@ Build the container image. It will land directly in Docker Desktop's local engin
 docker build -t drift-operator:latest .
 ```
 
-### Step 3: Deploy CRDs, RBAC, and Operator
+### Step 3: Deploy Full Umbrella Bundle (CRDs, RBAC, Operator, NetworkPolicy, Prometheus)
 
-Deploy manifests into Docker Desktop Kubernetes:
+Deploy all operator components into Docker Desktop Kubernetes in a single command using the umbrella Kustomize target:
+
+```cmd
+# Apply full umbrella deployment bundle
+kubectl apply -k config/default
+```
+
+Or apply individual layers step-by-step:
 
 ```cmd
 # 1. Create target namespace
 kubectl create namespace gitops-fleet
 
 # 2. Apply CRDs (ClusterAppReport, PropagationStatus, ChangeWindow)
-kubectl apply -f config/crd/bases/
+kubectl apply -k config/crd
 
 # 3. Apply RBAC (ServiceAccount, Role, RoleBindings, Leader Election Leases)
 kubectl apply -f config/rbac/

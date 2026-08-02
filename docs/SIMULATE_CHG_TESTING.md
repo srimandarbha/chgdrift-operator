@@ -174,16 +174,28 @@ kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic gitops.chang
   "chgNumber": "CHG-TEST-1001",
   "releaseTag": "v2.4.0",
   "expectedRevision": "rev-100",
-  "reportGeneratedAt": "2026-08-02T00:31:00Z",
+  "reportGeneratedAt": "2026-08-02T03:45:00Z",
   "phase": "Validated",
   "overallStatus": "Good",
   "validation": {
+    "clusterOperatorsHealthy": true,
     "allChangesApplied": true,
     "healthCheckPassed": true,
     "mcpUpdatedOnTime": true,
     "eventsClean": true,
     "objectsConverged": true,
     "dependenciesReady": true,
+    "virtImpactPassed": true,
+    "gateResults": [
+      { "name": "ClusterOperatorsHealthy", "status": "True", "reason": "AllClusterOperatorsHealthy" },
+      { "name": "AllChangesApplied", "status": "True", "reason": "AllClustersInSync" },
+      { "name": "HealthCheckPassed", "status": "True", "reason": "AllWorkloadsHealthy" },
+      { "name": "MCPUpdatedOnTime", "status": "True", "reason": "MachineConfigPoolConverged" },
+      { "name": "EventsClean", "status": "True", "reason": "NoNewWarningEvents" },
+      { "name": "ObjectsConverged", "status": "True", "reason": "AllObjectsConverged" },
+      { "name": "DependenciesReady", "status": "True", "reason": "AllDependenciesReady" },
+      { "name": "VirtImpactPassed", "status": "True", "reason": "VirtualizationPlatformHealthy" }
+    ],
     "issuesFound": [],
     "passed": true
   }
