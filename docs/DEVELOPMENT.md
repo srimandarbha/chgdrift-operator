@@ -132,3 +132,36 @@ Open `internal/controller/controllers.go` and add the new controller to the slic
 1. Add `config/crd/bases/gitops.example.com_mynewkinds.yaml` with the OpenAPI v3 validation schema.
 2. Add RBAC rules to `config/rbac/role.yaml` following the principle of least privilege.
 3. Register the resource in `PROJECT` metadata file.
+
+---
+
+## 5. Developer Guide: Extending Core Validation Engines
+
+### 5.1 Adding Semantic Nodes to `TypedPlatformGraph` (`internal/validator/graph.go`)
+To add a new component node to the causal dependency graph:
+1. Define a new `SemanticNodeType` constant (e.g. `NodeTypeOVNNetwork`).
+2. Create a `ResourceNode` struct with `SemanticType`, `Kind`, `Namespace`, `Name`, and an `Evaluator` function returning `(bool, string, error)`.
+3. Establish parent-child dependency edges in `NewTypedPlatformGraph()` (e.g., `ovnNode.Parents = []*ResourceNode{crioNode}`).
+
+### 5.2 Extending Cryptographic Evidence Models (`internal/validator/evidence.go`)
+1. To modify evidence payload structures, update `ImmutableEvidenceSnapshot` or `SignedAuditReport`.
+2. Always recalculate SHA-256 payload digests via `CalculateSHA256` and compute HMAC-SHA256 signatures via `SignHMAC256`.
+3. Ensure `VerifyReportSignature` unit tests pass in `internal/validator/evidence_test.go`.
+
+### 5.3 Executing Validation & Failure Injection Test Harnesses
+```bash
+# Run validator unit tests & cryptographic signature verification
+go test -v ./internal/validator/...
+
+# Run state machine controller tests
+go test -v ./internal/controller/... -run TestChangeWindow
+
+# Run synthetic failure injection suite (API throttling, Kafka outage, restart recovery)
+go test -v ./internal/controller/... -run TestFailureInjection
+
+# Run 10-goroutine parallel concurrency & scale benchmark suite
+go test -v ./internal/controller/... -run "TestConcurrency|Benchmark"
+
+# Run full project test suite
+go test -v ./...
+```

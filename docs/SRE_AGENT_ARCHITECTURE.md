@@ -441,4 +441,33 @@ async def start_chg_validation(payload: Dict[str, Any], background_tasks: Backgr
     }
     background_tasks.add_task(sre_agent_graph.invoke, initial_state)
     return {"status": "initiated", "chgNumber": payload["chgDetails"]["chgNumber"]}
+
+---
+
+## 5. Enterprise Operator Hardening & Audit Standards
+
+The peer `drift-operator` on each OpenShift cluster incorporates production hardening standards designed for autonomous maintenance approval:
+
+### 5.1 Fine-Grained 9-State Maintenance State Machine
+The operator reconciles `ChangeWindow` custom resources through 9 deterministic operational states:
+1. `Scheduled`: Maintenance window registered; awaiting `spec.startTime`.
+2. `BaselineCaptured`: Cluster baseline (ClusterVersion, MCP hash, operator versions) snapshot captured and persisted.
+3. `WaitingForChange`: Baseline established; waiting for ArgoCD/Flux workload sync or MachineConfig deployment.
+4. `Executing`: Active configuration rollout in progress across target nodes and workloads.
+5. `PlatformRecovering`: Workloads updated; observing MachineConfigPool node rollouts and operator stabilization.
+6. `ValidationRunning`: Executing topological dependency graph checks and tri-state safety gates.
+7. `Succeeded`: All 11 safety gates passed; post-maintenance stabilization complete.
+8. `Failed`: Infrastructure degradation, unrecovered nodes, or stalled VMI live migrations detected.
+9. `TimedOut`: Window reached `spec.endTime` prior to full stabilization.
+
+### 5.2 Cryptographic Signed Audit Report Lifecycle
+To prevent evidence spoofing or payload tampering, `drift-operator` produces a `SignedAuditReport` upon entering evaluation or terminal states:
+- **Payload Digest**: SHA-256 hash computed over `reportId`, `windowId`, `baselineDigest`, `overallResult`, and gate results.
+- **HMAC Signature**: HMAC-SHA256 signature generated using the cluster's secret key (`SignHMAC256`).
+- **Audit Verification**: Central SRE agents verify `hmacSignature` using `VerifyReportSignature` prior to approving automated changes.
+
+### 5.3 Typed Platform Dependency Graph
+The operator evaluates infrastructure health using an explicit semantic causal graph:
+`MachineConfig` $\rightarrow$ `RenderedConfig` $\rightarrow$ `MachineConfigPool` $\rightarrow$ `MachineConfigDaemon` $\rightarrow$ `NodeReady` $\rightarrow$ `CRI-O` $\rightarrow$ `kubelet` $\rightarrow$ `virt-handler` $\rightarrow$ `KubeVirt` $\rightarrow$ `VMIMigration`.
+Topological evaluation ensures parent failures halt child node checks, isolating upstream root causes from downstream symptoms.
 ```

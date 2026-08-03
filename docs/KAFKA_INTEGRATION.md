@@ -154,7 +154,20 @@ Published by ServiceNow or CI/CD to start a maintenance window:
 
 ## 5. Topic 2: Central LLM Validation Report Payload (`gitops.change.validation`)
 
-Published by `drift-operator` (`ChangeWindowReconciler`) after evaluating spoke cluster reports:
+Published by `drift-operator` (`ChangeWindowReconciler`) immediately on phase transitions or gate evaluations, with a 15-minute throttled heartbeat during steady-state. 
+
+### Enterprise Maintenance Window Phases (`.phase`)
+- `Scheduled`: Registered, awaiting maintenance start time (`spec.startTime`).
+- `BaselineCaptured`: Initial cluster state snapshot captured & stored.
+- `WaitingForChange`: Pre-maintenance baseline confirmed; awaiting workload updates.
+- `Executing`: Workloads / MachineConfigPools actively updating across target clusters.
+- `PlatformRecovering`: Workloads updated; waiting for MCPs, nodes, and operators to settle.
+- `ValidationRunning`: Evaluating typed dependency graph, causal chains, and safety gates.
+- `Succeeded`: All 11 safety gates passed; stabilization completed cleanly.
+- `Failed`: Critical operator degraded, stalled migration, or unresolved failure observed.
+- `TimedOut`: Maintenance window reached `spec.endTime` prior to full stabilization.
+
+### Validation Report Schema
 
 ```json
 {
@@ -162,7 +175,7 @@ Published by `drift-operator` (`ChangeWindowReconciler`) after evaluating spoke 
   "releaseTag": "v2.4.0",
   "expectedRevision": "a1b2c3d98f7e6c5b4a3f2e1d",
   "reportGeneratedAt": "2026-08-10T04:00:00Z",
-  "phase": "Validated",
+  "phase": "Succeeded",
   "overallStatus": "Good",
   "validation": {
     "allChangesApplied": true,
@@ -171,8 +184,25 @@ Published by `drift-operator` (`ChangeWindowReconciler`) after evaluating spoke 
     "eventsClean": true,
     "objectsConverged": true,
     "dependenciesReady": true,
+    "virtImpactPassed": true,
+    "clusterOperatorsHealthy": true,
     "issuesFound": [],
     "passed": true
+  },
+  "signedReport": {
+    "reportId": "report-CHG0012345-1770696000",
+    "windowId": "CHG0012345",
+    "timestamp": "2026-08-10T04:00:00Z",
+    "baselineDigest": "a3f8901b2c3d4e5f",
+    "evidenceChecksumSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "hmacSignature": "8f3b2a1c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a",
+    "overallResult": "Succeeded"
   }
 }
 ```
+
+### Cryptographic Audit Verification
+The `signedReport` block allows central auditors and SRE agents to verify report authenticity without querying the API server directly:
+1. Re-calculate SHA-256 digest over `reportId`, `windowId`, `baselineDigest`, `overallResult`, and gate results.
+2. Re-compute HMAC-SHA256 signature using cluster secret key (`SignHMAC256`).
+3. Compare against `hmacSignature` (`VerifyReportSignature`) to prove tamper resistance.
