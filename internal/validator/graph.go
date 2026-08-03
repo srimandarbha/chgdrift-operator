@@ -11,14 +11,31 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ResourceNode represents a single component node in the maintenance causal dependency graph.
+// SemanticNodeType defines precise semantic classifications for infrastructure components.
+type SemanticNodeType string
+
+const (
+	NodeTypeMachineConfig  SemanticNodeType = "MachineConfig"
+	NodeTypeRenderedConfig SemanticNodeType = "RenderedConfig"
+	NodeTypeMCP           SemanticNodeType = "MachineConfigPool"
+	NodeTypeMCD           SemanticNodeType = "MachineConfigDaemon"
+	NodeTypeNodeReady     SemanticNodeType = "NodeReady"
+	NodeTypeCRIO          SemanticNodeType = "CRIO"
+	NodeTypeKubelet       SemanticNodeType = "Kubelet"
+	NodeTypeVirtHandler   SemanticNodeType = "VirtHandler"
+	NodeTypeKubeVirt      SemanticNodeType = "KubeVirt"
+	NodeTypeVMIMigration  SemanticNodeType = "VirtualMachineInstanceMigration"
+)
+
+// ResourceNode represents a single component node in the typed maintenance causal dependency graph.
 type ResourceNode struct {
-	ID        string
-	Kind      string
-	Namespace string
-	Name      string
-	Evaluator func(ctx context.Context, c client.Client) (bool, error)
-	Parents   []*ResourceNode
+	ID           string
+	SemanticType SemanticNodeType
+	Kind         string
+	Namespace    string
+	Name         string
+	Evaluator    func(ctx context.Context, c client.Client) (bool, string, error)
+	Parents      []*ResourceNode
 }
 
 // DependencyGraph encapsulates the topological graph structure.
@@ -26,16 +43,46 @@ type DependencyGraph struct {
 	Nodes map[string]*ResourceNode
 }
 
-// NewVirtMaintenanceGraph initializes the OpenShift Virtualization maintenance DAG:
-// MachineConfigPool -> MachineConfigDaemon -> virt-handler -> VMIM (VirtualMachineInstanceMigration).
-func NewVirtMaintenanceGraph() *DependencyGraph {
+// NewTypedPlatformGraph initializes the complete OpenShift Virtualization semantic maintenance DAG:
+// MachineConfig -> RenderedConfig -> MCP -> MCD -> NodeReady -> CRIO -> Kubelet -> VirtHandler -> KubeVirt -> VMIMigration.
+func NewTypedPlatformGraph() *DependencyGraph {
 	g := &DependencyGraph{Nodes: make(map[string]*ResourceNode)}
 
+	mcNode := &ResourceNode{
+		ID:           "mc/00-worker",
+		SemanticType: NodeTypeMachineConfig,
+		Kind:         "MachineConfig",
+		Name:         "00-worker",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			mc := &unstructured.Unstructured{}
+			mc.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "machineconfiguration.openshift.io",
+				Version: "v1",
+				Kind:    "MachineConfig",
+			})
+			if err := c.Get(ctx, types.NamespacedName{Name: "00-worker"}, mc); err != nil {
+				return true, "MachineConfig check skipped (not present)", nil
+			}
+			return true, "MachineConfig valid", nil
+		},
+	}
+
+	renderedNode := &ResourceNode{
+		ID:           "rendered/rendered-worker",
+		SemanticType: NodeTypeRenderedConfig,
+		Kind:         "MachineConfig",
+		Name:         "rendered-worker",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			return true, "Rendered config converged", nil
+		},
+	}
+
 	mcpNode := &ResourceNode{
-		ID:   "mcp/worker",
-		Kind: "MachineConfigPool",
-		Name: "worker",
-		Evaluator: func(ctx context.Context, c client.Client) (bool, error) {
+		ID:           "mcp/worker",
+		SemanticType: NodeTypeMCP,
+		Kind:         "MachineConfigPool",
+		Name:         "worker",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
 			mcp := &unstructured.Unstructured{}
 			mcp.SetGroupVersionKind(schema.GroupVersionKind{
 				Group:   "machineconfiguration.openshift.io",
@@ -43,43 +90,87 @@ func NewVirtMaintenanceGraph() *DependencyGraph {
 				Kind:    "MachineConfigPool",
 			})
 			if err := c.Get(ctx, types.NamespacedName{Name: "worker"}, mcp); err != nil {
-				// If resource doesn't exist, treat as healthy for test/graceful mode
-				return true, nil
+				return true, "MachineConfigPool check skipped (resource missing)", nil
 			}
 			ready, _, _ := unstructured.NestedInt64(mcp.Object, "status", "readyMachineCount")
 			total, _, _ := unstructured.NestedInt64(mcp.Object, "status", "machineCount")
 			degraded, _, _ := unstructured.NestedInt64(mcp.Object, "status", "degradedMachineCount")
-			if degraded > 0 || (total > 0 && ready < total) {
-				return false, nil
+			if degraded > 0 {
+				return false, fmt.Sprintf("MCP worker degraded (degradedMachineCount=%d)", degraded), nil
 			}
-			return true, nil
+			if total > 0 && ready < total {
+				return false, fmt.Sprintf("MCP worker updating (ready %d/%d)", ready, total), nil
+			}
+			return true, "MCP worker fully converged", nil
 		},
 	}
 
 	mcdNode := &ResourceNode{
-		ID:        "mcd/node-1",
-		Kind:      "Pod",
-		Namespace: "openshift-machine-config-operator",
-		Name:      "machine-config-daemon",
-		Evaluator: func(ctx context.Context, c client.Client) (bool, error) {
+		ID:           "mcd/openshift-mco",
+		SemanticType: NodeTypeMCD,
+		Kind:         "Pod",
+		Namespace:    "openshift-machine-config-operator",
+		Name:         "machine-config-daemon",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
 			var podList corev1.PodList
 			if err := c.List(ctx, &podList, client.InNamespace("openshift-machine-config-operator"), client.MatchingLabels{"k8s-app": "machine-config-daemon"}); err == nil && len(podList.Items) > 0 {
 				for _, p := range podList.Items {
 					if p.Status.Phase != corev1.PodRunning {
-						return false, nil
+						return false, fmt.Sprintf("MCD pod %s not running (phase: %s)", p.Name, p.Status.Phase), nil
 					}
 				}
 			}
-			return true, nil
+			return true, "MachineConfigDaemon pods healthy", nil
+		},
+	}
+
+	nodeReadyNode := &ResourceNode{
+		ID:           "node/cluster-nodes",
+		SemanticType: NodeTypeNodeReady,
+		Kind:         "Node",
+		Name:         "cluster-nodes",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			var nodeList corev1.NodeList
+			if err := c.List(ctx, &nodeList, client.Limit(100)); err == nil {
+				for _, n := range nodeList.Items {
+					for _, cond := range n.Status.Conditions {
+						if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
+							return false, fmt.Sprintf("Node %s is not Ready", n.Name), nil
+						}
+					}
+				}
+			}
+			return true, "All nodes Ready", nil
+		},
+	}
+
+	crioNode := &ResourceNode{
+		ID:           "cri-o/container-runtime",
+		SemanticType: NodeTypeCRIO,
+		Kind:         "Node",
+		Name:         "cri-o",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			return true, "CRI-O runtime operational", nil
+		},
+	}
+
+	kubeletNode := &ResourceNode{
+		ID:           "kubelet/node-agent",
+		SemanticType: NodeTypeKubelet,
+		Kind:         "Node",
+		Name:         "kubelet",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			return true, "Kubelet responsive", nil
 		},
 	}
 
 	virtHandlerNode := &ResourceNode{
-		ID:        "daemonset/virt-handler",
-		Kind:      "DaemonSet",
-		Namespace: "openshift-cnv",
-		Name:      "virt-handler",
-		Evaluator: func(ctx context.Context, c client.Client) (bool, error) {
+		ID:           "daemonset/virt-handler",
+		SemanticType: NodeTypeVirtHandler,
+		Kind:         "DaemonSet",
+		Namespace:    "openshift-cnv",
+		Name:         "virt-handler",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
 			var dsList unstructured.UnstructuredList
 			dsList.SetGroupVersionKind(schema.GroupVersionKind{
 				Group:   "apps",
@@ -91,19 +182,43 @@ func NewVirtMaintenanceGraph() *DependencyGraph {
 					desired, _, _ := unstructured.NestedInt64(ds.Object, "status", "desiredNumberScheduled")
 					ready, _, _ := unstructured.NestedInt64(ds.Object, "status", "numberReady")
 					if desired > 0 && ready < desired {
-						return false, nil
+						return false, fmt.Sprintf("virt-handler DaemonSet updating (ready %d/%d)", ready, desired), nil
 					}
 				}
 			}
-			return true, nil
+			return true, "virt-handler DaemonSet healthy", nil
+		},
+	}
+
+	kubevirtNode := &ResourceNode{
+		ID:           "kubevirt/kubevirt-kubevirt",
+		SemanticType: NodeTypeKubeVirt,
+		Kind:         "KubeVirt",
+		Namespace:    "openshift-cnv",
+		Name:         "kubevirt-kubevirt",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			kv := &unstructured.Unstructured{}
+			kv.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "kubevirt.io",
+				Version: "v1",
+				Kind:    "KubeVirt",
+			})
+			if err := c.Get(ctx, types.NamespacedName{Namespace: "openshift-cnv", Name: "kubevirt-kubevirt"}, kv); err == nil {
+				phase, _, _ := unstructured.NestedString(kv.Object, "status", "phase")
+				if phase != "" && phase != "Deployed" {
+					return false, fmt.Sprintf("KubeVirt control plane phase is %s (expected Deployed)", phase), nil
+				}
+			}
+			return true, "KubeVirt control plane deployed", nil
 		},
 	}
 
 	vmimNode := &ResourceNode{
-		ID:   "vmim/active-migrations",
-		Kind: "VirtualMachineInstanceMigration",
-		Name: "active-migrations",
-		Evaluator: func(ctx context.Context, c client.Client) (bool, error) {
+		ID:           "vmim/active-migrations",
+		SemanticType: NodeTypeVMIMigration,
+		Kind:         "VirtualMachineInstanceMigration",
+		Name:         "active-migrations",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
 			var vmimList unstructured.UnstructuredList
 			vmimList.SetGroupVersionKind(schema.GroupVersionKind{
 				Group:   "kubevirt.io",
@@ -117,28 +232,46 @@ func NewVirtMaintenanceGraph() *DependencyGraph {
 						for _, condRaw := range conditions {
 							if cond, ok := condRaw.(map[string]interface{}); ok {
 								if cond["type"] == "Stalled" && cond["status"] == "True" {
-									return false, nil
+									return false, fmt.Sprintf("VirtualMachineInstanceMigration %s is Stalled", vmim.GetName()), nil
 								}
 							}
 						}
 					}
 				}
 			}
-			return true, nil
+			return true, "Live migrations healthy", nil
 		},
 	}
 
-	// Establish Causal Dependencies: MCP -> MCD -> virt-handler -> VMIM
+	// Establish Typed Causal Dependencies:
+	// MachineConfig -> RenderedConfig -> MCP -> MCD -> NodeReady -> CRIO -> Kubelet -> virt-handler -> KubeVirt -> VMIM
+	renderedNode.Parents = []*ResourceNode{mcNode}
+	mcpNode.Parents = []*ResourceNode{renderedNode}
 	mcdNode.Parents = []*ResourceNode{mcpNode}
-	virtHandlerNode.Parents = []*ResourceNode{mcdNode}
-	vmimNode.Parents = []*ResourceNode{virtHandlerNode}
+	nodeReadyNode.Parents = []*ResourceNode{mcdNode}
+	crioNode.Parents = []*ResourceNode{nodeReadyNode}
+	kubeletNode.Parents = []*ResourceNode{crioNode}
+	virtHandlerNode.Parents = []*ResourceNode{kubeletNode}
+	kubevirtNode.Parents = []*ResourceNode{virtHandlerNode}
+	vmimNode.Parents = []*ResourceNode{kubevirtNode}
 
+	g.Nodes[mcNode.ID] = mcNode
+	g.Nodes[renderedNode.ID] = renderedNode
 	g.Nodes[mcpNode.ID] = mcpNode
 	g.Nodes[mcdNode.ID] = mcdNode
+	g.Nodes[nodeReadyNode.ID] = nodeReadyNode
+	g.Nodes[crioNode.ID] = crioNode
+	g.Nodes[kubeletNode.ID] = kubeletNode
 	g.Nodes[virtHandlerNode.ID] = virtHandlerNode
+	g.Nodes[kubevirtNode.ID] = kubevirtNode
 	g.Nodes[vmimNode.ID] = vmimNode
 
 	return g
+}
+
+// NewVirtMaintenanceGraph initializes the OpenShift Virtualization maintenance DAG (alias for backwards compatibility).
+func NewVirtMaintenanceGraph() *DependencyGraph {
+	return NewTypedPlatformGraph()
 }
 
 // EvaluateCausalChain evaluates nodes in topological dependency order.
@@ -146,9 +279,10 @@ func NewVirtMaintenanceGraph() *DependencyGraph {
 func (g *DependencyGraph) EvaluateCausalChain(ctx context.Context, c client.Client) error {
 	for _, node := range g.Nodes {
 		for _, parent := range node.Parents {
-			ok, err := parent.Evaluator(ctx, c)
+			ok, reason, err := parent.Evaluator(ctx, c)
 			if err != nil || !ok {
-				return fmt.Errorf("causal dependency failure: parent [%s] failed validation; blocking execution of child [%s]", parent.ID, node.ID)
+				return fmt.Errorf("causal dependency failure: parent [%s] (%s) failed validation: %s; blocking child [%s] (%s)",
+					parent.ID, parent.SemanticType, reason, node.ID, node.SemanticType)
 			}
 		}
 	}

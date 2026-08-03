@@ -391,4 +391,57 @@ func TestEvaluateTopologicalDAG_ParentFailureHaltsChildren(t *testing.T) {
 	}
 }
 
+func TestPredictMCPConvergence_VelocityAndStall(t *testing.T) {
+	mcpUpdating := gitopsv1alpha1.MachineConfigPoolStatus{
+		Name:               "worker",
+		MachineCount:       10,
+		UpdatedNodeCount:   5,
+		UpdatingNodeCount:  5,
+		DegradedNodeCount:  0,
+		Phase:              "Updating",
+	}
+
+	pred := PredictMCPConvergence(mcpUpdating, 100) // 5 nodes updated in 100s -> 0.05 nodes/sec, ETA 100s for 5 nodes
+	if pred.IsStalled {
+		t.Errorf("expected pool rollout to be active, not stalled")
+	}
+	if pred.EstimatedETASeconds != 100 {
+		t.Errorf("expected ETA 100s, got %d", pred.EstimatedETASeconds)
+	}
+
+	mcpDegraded := gitopsv1alpha1.MachineConfigPoolStatus{
+		Name:               "worker",
+		MachineCount:       10,
+		UpdatedNodeCount:   3,
+		UpdatingNodeCount:  7,
+		DegradedNodeCount:  1,
+		Phase:              "Degraded",
+	}
+
+	predDegraded := PredictMCPConvergence(mcpDegraded, 120)
+	if !predDegraded.IsStalled {
+		t.Errorf("expected degraded pool to be marked as stalled")
+	}
+}
+
+func TestEvaluateClusterOperatorOrdering_UpstreamFailureImpactsDownstream(t *testing.T) {
+	operators := []gitopsv1alpha1.ClusterOperatorStatus{
+		{Name: "network", Available: true, Degraded: true},
+		{Name: "kube-apiserver", Available: true, Degraded: false},
+		{Name: "kubevirt", Available: true, Degraded: false},
+	}
+
+	res := EvaluateClusterOperatorOrdering(operators)
+	if res.OrderedCheckPassed {
+		t.Fatalf("expected ordering check to fail when network operator is degraded")
+	}
+	if res.FailedOperator != "network" {
+		t.Errorf("expected failed operator to be network, got %s", res.FailedOperator)
+	}
+	if len(res.ImpactedOperators) < 2 {
+		t.Errorf("expected downstream operators to be flagged as impacted, got %v", res.ImpactedOperators)
+	}
+}
+
+
 

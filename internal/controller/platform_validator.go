@@ -592,4 +592,109 @@ func EvaluateTopologicalDAG(obs gitopsv1alpha1.PlatformObservationStatus) gitops
 	}
 }
 
+// MCPConvergencePrediction encapsulates predictive rollout analysis for MachineConfigPools.
+type MCPConvergencePrediction struct {
+	PoolName            string `json:"poolName"`
+	TotalNodes          int32  `json:"totalNodes"`
+	UpdatedNodes        int32  `json:"updatedNodes"`
+	UpdatingNodes       int32  `json:"updatingNodes"`
+	EstimatedETASeconds int64  `json:"estimatedEtaSeconds"`
+	IsStalled           bool   `json:"isStalled"`
+	Reason              string `json:"reason"`
+}
+
+// PredictMCPConvergence predicts convergence velocity and ETA for MachineConfigPool rollouts.
+func PredictMCPConvergence(mcp gitopsv1alpha1.MachineConfigPoolStatus, elapsedSeconds int64) MCPConvergencePrediction {
+	pred := MCPConvergencePrediction{
+		PoolName:      mcp.Name,
+		TotalNodes:    mcp.MachineCount,
+		UpdatedNodes:  mcp.UpdatedNodeCount,
+		UpdatingNodes: mcp.UpdatingNodeCount,
+	}
+
+	if mcp.Phase == "Updated" || mcp.UpdatingNodeCount == 0 {
+		pred.EstimatedETASeconds = 0
+		pred.Reason = "Pool fully converged"
+		return pred
+	}
+
+	if mcp.DegradedNodeCount > 0 {
+		pred.IsStalled = true
+		pred.Reason = fmt.Sprintf("%d node(s) degraded in pool %s", mcp.DegradedNodeCount, mcp.Name)
+		return pred
+	}
+
+	if elapsedSeconds > 0 && mcp.UpdatedNodeCount > 0 {
+		ratePerSecond := float64(mcp.UpdatedNodeCount) / float64(elapsedSeconds)
+		if ratePerSecond > 0 {
+			remainingNodes := float64(mcp.UpdatingNodeCount)
+			pred.EstimatedETASeconds = int64(remainingNodes / ratePerSecond)
+			pred.Reason = fmt.Sprintf("Rollout in progress (ETA ~%ds)", pred.EstimatedETASeconds)
+			return pred
+		}
+	}
+
+	if elapsedSeconds > 300 && mcp.UpdatedNodeCount == 0 {
+		pred.IsStalled = true
+		pred.Reason = fmt.Sprintf("No nodes updated after %ds; rollout stalled", elapsedSeconds)
+		return pred
+	}
+
+	pred.Reason = "Rollout initiated; observing node progress"
+	return pred
+}
+
+// ClusterOperatorOrderResult describes topological ClusterOperator status.
+type ClusterOperatorOrderResult struct {
+	OrderedCheckPassed bool     `json:"orderedCheckPassed"`
+	FailedOperator     string   `json:"failedOperator,omitempty"`
+	ImpactedOperators  []string `json:"impactedOperators,omitempty"`
+	Summary            string   `json:"summary"`
+}
+
+// EvaluateClusterOperatorOrdering validates ClusterOperators in strict platform dependency order:
+// network -> kube-apiserver -> openshift-apiserver -> storage -> kubevirt.
+func EvaluateClusterOperatorOrdering(operators []gitopsv1alpha1.ClusterOperatorStatus) ClusterOperatorOrderResult {
+	order := []string{"network", "kube-apiserver", "openshift-apiserver", "storage", "kubevirt"}
+	opMap := make(map[string]gitopsv1alpha1.ClusterOperatorStatus)
+
+	for _, op := range operators {
+		opMap[op.Name] = op
+	}
+
+	var firstFailed string
+	var impacted []string
+
+	for _, name := range order {
+		op, exists := opMap[name]
+		if !exists {
+			continue
+		}
+
+		if firstFailed != "" {
+			impacted = append(impacted, name)
+			continue
+		}
+
+		if op.Degraded || !op.Available {
+			firstFailed = name
+		}
+	}
+
+	if firstFailed != "" {
+		return ClusterOperatorOrderResult{
+			OrderedCheckPassed: false,
+			FailedOperator:     firstFailed,
+			ImpactedOperators:  impacted,
+			Summary:            fmt.Sprintf("Upstream ClusterOperator [%s] degraded; downstream operators %v impacted", firstFailed, impacted),
+		}
+	}
+
+	return ClusterOperatorOrderResult{
+		OrderedCheckPassed: true,
+		Summary:            "All core ClusterOperators available in topological order",
+	}
+}
+
+
 

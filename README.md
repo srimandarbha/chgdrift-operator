@@ -76,23 +76,25 @@ drift-operator/
   - `KubeVirt` / `CDI` / `SSP` / `HyperConverged`: Validates operator phase (`Deployed`), target vs. observed version, conditions.
   - `NodeMaintenance`: Detects active maintenance nodes that block VMI scheduling.
   - `MigrationPolicy`: Inspects bandwidth limits and auto-converge configuration.
-  - `ClusterOperator`: Tracks Available/Degraded/Progressing across all platform operators.
-  - `MachineConfigPool`: Reports rollout state across **all** pools (worker, master, virt-worker).
+  - `ClusterOperator`: Evaluates topological dependency ordering (`network` -> `kube-apiserver` -> `openshift-apiserver` -> `storage` -> `kubevirt`).
+  - `MachineConfigPool`: Reports rollout state across all pools and runs **MCP Convergence Prediction** (estimating ETA & flagging stalled rollouts).
   - `virt-handler` DaemonSet: Validates readiness for VMI scheduling.
   - `VirtualMachineInstanceMigration`: Counts active vs. stalled live migrations.
-  - `VirtualMachineInstance`: Counts unmigratable VMIs with `LiveMigratable=False`.
   - Operates in a **Forward-Fix Only Paradigm** without attempting destructive rollbacks.
+- **Typed Platform Dependency Graph (`internal/validator/graph.go`)**:
+  - Evaluates explicit semantic node sequence: `MachineConfig` $\rightarrow$ `RenderedConfig` $\rightarrow$ `MachineConfigPool` $\rightarrow$ `MachineConfigDaemon` $\rightarrow$ `NodeReady` $\rightarrow$ `CRI-O` $\rightarrow$ `kubelet` $\rightarrow$ `virt-handler` $\rightarrow$ `KubeVirt` $\rightarrow$ `VMIMigration`.
+  - Isolates root-cause failures from downstream cascading symptoms.
+- **Immutable Evidence Lifecycle & Cryptographic Audit Signing (`internal/validator/evidence.go`)**:
+  - Executes a 5-stage evidence pipeline: `Baseline` $\rightarrow$ `Snapshot` $\rightarrow$ `Correlation` $\rightarrow$ `Evaluation` $\rightarrow$ `Signed Audit Report`.
+  - Computes SHA-256 evidence digests and signs reports with **HMAC-SHA256 cryptographic signatures** (`SignedAuditReport`).
 - **11 Post-Deployment Validation Gates (Tri-State Granularity)**:
   - Platform gates: `clusterVersionStable`, `clusterOperatorsHealthy`, `platformOperatorsDeployed`, `mcpUpdatedOnTime`, `noActiveNodeMaintenance`.
   - Workload gates: `allChangesApplied`, `healthCheckPassed`, `eventsClean`, `objectsConverged`, `dependenciesReady`, `virtImpactPassed`.
   - Each gate independently evaluates to `GateStatusTrue`, `GateStatusFalse`, or `GateStatusUnknown` based on per-cluster telemetry presence.
-  - Dynamic maintenance silence classification (`sawReportSinceChgStart`) comparing report timestamps (`ObservedAt`) to window `StartTime`.
-- **Phased Maintenance Pipeline**:
-  - State machine transitions: `Pending` $\rightarrow$ `PreChecking` $\rightarrow$ `InProgress` $\rightarrow$ `Stabilizing` $\rightarrow$ `Validated` / `ValidationFailed`.
-  - Automatic `StabilizationStartedAt` reset on mid-window regression to enforce a fresh stabilization period upon recovery.
-- **Clean Evidence & Diagnostic Log Management**:
-  - Captures tail pod logs when apps are `OutOfSync` or `Degraded`.
-  - Action history records leave `logRef = ""` when action is `Parked` (preventing fake URL generation).
+- **Fine-Grained 9-State Maintenance Pipeline**:
+  - State machine transitions: `Scheduled` $\rightarrow$ `BaselineCaptured` $\rightarrow$ `WaitingForChange` $\rightarrow$ `Executing` $\rightarrow$ `PlatformRecovering` $\rightarrow$ `ValidationRunning` $\rightarrow$ `Succeeded` / `Failed` / `TimedOut`.
+- **Failure Injection & Concurrency Test Suites**:
+  - Includes automated test suites in `internal/controller/` simulating API server throttling, Kafka disconnects & duplicate message ingestion, operator restart recovery, 10-goroutine parallel reconciles, and scale benchmarks.
 - **Umbrella Deployment Bundle (`config/default`)**:
   - Full kustomize target composing CRDs, Manager Deployment, SCC RBAC, NetworkPolicy egress, and Prometheus ServiceMonitor/Alerts (`kustomize build config/default`).
 - **OpenShift `restricted-v2` SCC Compliant Deployment**:

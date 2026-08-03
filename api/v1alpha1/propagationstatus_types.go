@@ -531,6 +531,32 @@ type TimelineEntry struct {
 	CausalImpact string      `json:"causalImpact,omitempty"`
 }
 
+// Enterprise Maintenance Window Phases
+const (
+	PhaseScheduled          = "Scheduled"
+	PhaseBaselineCaptured   = "BaselineCaptured"
+	PhaseWaitingForChange   = "WaitingForChange"
+	PhaseExecuting          = "Executing"
+	PhasePlatformRecovering = "PlatformRecovering"
+	PhaseValidationRunning  = "ValidationRunning"
+	PhaseSucceeded          = "Succeeded"
+	PhaseFailed             = "Failed"
+	PhaseTimedOut           = "TimedOut"
+)
+
+// SignedAuditReport encapsulates immutable evidence snapshot, checksum, and HMAC signature.
+type SignedAuditReport struct {
+	ReportID               string       `json:"reportId"`
+	WindowID               string       `json:"windowId"`
+	Timestamp              metav1.Time  `json:"timestamp"`
+	BaselineDigest         string       `json:"baselineDigest,omitempty"`
+	EvidenceChecksumSHA256 string       `json:"evidenceChecksumSHA256"`
+	HMACSignature          string       `json:"hmacSignature"`
+	OverallResult          string       `json:"overallResult"`
+	// +listType=atomic
+	GateResults            []GateResult `json:"gateResults,omitempty"`
+}
+
 type ChangeWindowStatus struct {
 	Phase                  string                        `json:"phase,omitempty"`
 	OverallStatus          string                        `json:"overallStatus,omitempty"`
@@ -541,6 +567,7 @@ type ChangeWindowStatus struct {
 	LastReportedAt         metav1.Time                   `json:"lastReportedAt,omitempty"`
 	AppStates              map[string]AppClusterStateMap `json:"appStates,omitempty"`
 	Baseline               *BaselineSnapshot             `json:"baseline,omitempty"`
+	SignedReport           *SignedAuditReport            `json:"signedReport,omitempty"`
 	// +listType=atomic
 	Timeline               []TimelineEntry               `json:"timeline,omitempty"`
 }

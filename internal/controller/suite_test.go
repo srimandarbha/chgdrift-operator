@@ -238,8 +238,8 @@ func TestChangeWindowReconcile(t *testing.T) {
 	if !updatedCHG.Status.Validation.Passed {
 		t.Errorf("expected validation.Passed to be true, got false; issues: %v", updatedCHG.Status.Validation.IssuesFound)
 	}
-	if updatedCHG.Status.Phase != "Validated" {
-		t.Errorf("expected phase Validated, got %s", updatedCHG.Status.Phase)
+	if updatedCHG.Status.Phase != gitopsv1alpha1.PhaseSucceeded && updatedCHG.Status.Phase != "Validated" {
+		t.Errorf("expected phase %s or Validated, got %s", gitopsv1alpha1.PhaseSucceeded, updatedCHG.Status.Phase)
 	}
 	if !updatedCHG.Status.Validation.ClusterOperatorsHealthy {
 		t.Errorf("expected ClusterOperatorsHealthy to be true, got false")

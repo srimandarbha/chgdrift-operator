@@ -137,13 +137,18 @@ func TestChangeWindow_11GatesAllPass(t *testing.T) {
 	if len(updatedCHG.Status.Validation.GateResults) != 11 {
 		t.Errorf("expected exactly 11 gate results, got %d", len(updatedCHG.Status.Validation.GateResults))
 	}
-	if updatedCHG.Status.Phase != "Validated" {
-		t.Errorf("expected phase Validated, got %s", updatedCHG.Status.Phase)
+	if updatedCHG.Status.Phase != gitopsv1alpha1.PhaseSucceeded && updatedCHG.Status.Phase != "Validated" {
+		t.Errorf("expected phase %s or Validated, got %s", gitopsv1alpha1.PhaseSucceeded, updatedCHG.Status.Phase)
 	}
 	if updatedCHG.Status.Baseline == nil {
 		t.Errorf("expected baseline snapshot to be captured")
 	} else if updatedCHG.Status.Baseline.ClusterVersion != "4.14.1" {
 		t.Errorf("expected baseline ClusterVersion 4.14.1, got %s", updatedCHG.Status.Baseline.ClusterVersion)
+	}
+	if updatedCHG.Status.SignedReport == nil {
+		t.Errorf("expected SignedReport to be generated for succeeded ChangeWindow")
+	} else if updatedCHG.Status.SignedReport.HMACSignature == "" {
+		t.Errorf("expected SignedReport to have valid HMAC signature")
 	}
 }
 

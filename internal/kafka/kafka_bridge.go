@@ -135,6 +135,9 @@ func isClusterTargeted(clusterName string, targetClusters []string) bool {
 }
 
 func (kb *KafkaBridge) ProduceReport(ctx context.Context, chgNumber string, payload []byte) error {
+	if kb == nil || kb.Writer == nil {
+		return fmt.Errorf("kafka bridge or writer is uninitialized/nil")
+	}
 	msg := kafka.Message{
 		Key:   []byte(chgNumber),
 		Value: payload,

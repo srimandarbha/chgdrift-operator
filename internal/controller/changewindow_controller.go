@@ -22,6 +22,7 @@ import (
 
 	gitopsv1alpha1 "example.com/drift-operator/api/v1alpha1"
 	"example.com/drift-operator/internal/kafka"
+	"example.com/drift-operator/internal/validator"
 )
 
 // ChangeWindowReconciler reconciles ChangeWindow objects.
@@ -61,7 +62,7 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if now.Before(chg.Spec.StartTime.Time) {
 		waitDuration := chg.Spec.StartTime.Time.Sub(now)
 		logger.Info("CHG maintenance window pending start", "chg", chg.Spec.CHGNumber, "startsIn", waitDuration.String())
-		chg.Status.Phase = "Pending"
+		chg.Status.Phase = gitopsv1alpha1.PhaseScheduled
 		chg.Status.OverallStatus = "Pending"
 		if !reflect.DeepEqual(original.Status, chg.Status) {
 			_ = r.Status().Patch(ctx, &chg, client.MergeFrom(original))
@@ -106,6 +107,12 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	// Capture baseline snapshot at window start for evidence model if not already set
+	if chg.Status.Baseline == nil {
+		chg.Status.Baseline = r.captureBaseline(&chg, now)
+		chg.Status.Phase = gitopsv1alpha1.PhaseBaselineCaptured
+	}
+
 	// 3. Maintenance Silence & Silence Classification (Kafka CHG JSON Driven)
 	var silentClusters []gitopsv1alpha1.SilentClusterState
 	for appName, appStateMap := range chg.Status.AppStates {
@@ -127,17 +134,12 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// 5. Post-Validation Logic & Maintenance Pipeline (PreChecking -> InProgress -> Stabilizing -> Validated)
+	// 5. Post-Validation Logic & Maintenance Pipeline (BaselineCaptured -> WaitingForChange -> Executing -> PlatformRecovering -> ValidationRunning -> Succeeded/Failed/TimedOut)
 	validationRes, _ := r.evaluateGates(ctx, &chg, now)
 	chg.Status.Validation = validationRes
 
 	previousPhase := chg.Status.Phase
 	var requeueAfter time.Duration
-
-	// Capture baseline snapshot at window start for evidence model if not already set
-	if chg.Status.Baseline == nil {
-		chg.Status.Baseline = r.captureBaseline(&chg, now)
-	}
 
 	switch {
 	case validationRes.Passed:
@@ -149,16 +151,16 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 			stabEnd := chg.Status.StabilizationStartedAt.Time.Add(stabSeconds)
 			if now.Before(stabEnd) {
-				chg.Status.Phase = "Stabilizing"
+				chg.Status.Phase = gitopsv1alpha1.PhasePlatformRecovering
 				chg.Status.OverallStatus = "InProgress"
 				requeueAfter = 15 * time.Second
 			} else {
-				chg.Status.Phase = "Validated"
+				chg.Status.Phase = gitopsv1alpha1.PhaseSucceeded
 				chg.Status.OverallStatus = "Good"
 				requeueAfter = 60 * time.Second
 			}
 		} else {
-			chg.Status.Phase = "Validated"
+			chg.Status.Phase = gitopsv1alpha1.PhaseSucceeded
 			chg.Status.OverallStatus = "Good"
 			requeueAfter = 60 * time.Second
 		}
@@ -166,20 +168,36 @@ func (r *ChangeWindowReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	case now.After(chg.Spec.EndTime.Time):
 		// Reset stabilization clock on regression/failure
 		chg.Status.StabilizationStartedAt = nil
-		chg.Status.Phase = "ValidationFailed"
+		chg.Status.Phase = gitopsv1alpha1.PhaseTimedOut
 		chg.Status.OverallStatus = "Degraded"
 		requeueAfter = 60 * time.Second
 
 	default:
 		// Reset stabilization clock on regression
 		chg.Status.StabilizationStartedAt = nil
-		if previousPhase == "Pending" || previousPhase == "" {
-			chg.Status.Phase = "PreChecking"
+		if previousPhase == gitopsv1alpha1.PhaseScheduled || previousPhase == gitopsv1alpha1.PhaseBaselineCaptured || previousPhase == "Pending" || previousPhase == "" {
+			chg.Status.Phase = gitopsv1alpha1.PhaseWaitingForChange
 		} else {
-			chg.Status.Phase = "InProgress"
+			chg.Status.Phase = gitopsv1alpha1.PhaseExecuting
 		}
 		chg.Status.OverallStatus = "InProgress"
 		requeueAfter = 15 * time.Second
+	}
+
+	// Generate cryptographically signed audit report when entering terminal or evaluation states
+	if chg.Status.Phase == gitopsv1alpha1.PhaseSucceeded || chg.Status.Phase == gitopsv1alpha1.PhaseFailed || chg.Status.Phase == gitopsv1alpha1.PhaseTimedOut {
+		baselineDigest := "baseline-digest-none"
+		if chg.Status.Baseline != nil {
+			baselineDigest = chg.Status.Baseline.ClusterOperatorDigest
+		}
+		secretKey := []byte(chg.Spec.CHGNumber)
+		if len(secretKey) == 0 {
+			secretKey = []byte("chg-signing-key-default")
+		}
+		report, err := validator.GenerateSignedReport(chg.Spec.CHGNumber, baselineDigest, chg.Status.Validation.GateResults, chg.Status.Phase, secretKey)
+		if err == nil {
+			chg.Status.SignedReport = report
+		}
 	}
 
 	// 6. Record timeline entry on phase change
