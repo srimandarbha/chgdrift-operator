@@ -679,12 +679,22 @@ func (r *LocalAppWatchReconciler) readVirtualizationStatus(ctx context.Context, 
 						cStatus, _ := cond["status"].(string)
 						if cType == "LiveMigratable" && cStatus == "False" {
 							isLiveMigratable = false
-							health.UnmigratableVMIs++
-							workloads.UnmigratableVMIs++
 						}
 					}
 				}
-				if isLiveMigratable {
+
+				// Host passthrough / Non-migratable pre-flight checks (GPU, SR-IOV, hostDevices)
+				if gpus, found, _ := unstructured.NestedSlice(vmi.Object, "spec", "domain", "devices", "gpus"); found && len(gpus) > 0 {
+					isLiveMigratable = false
+				}
+				if hostDevs, found, _ := unstructured.NestedSlice(vmi.Object, "spec", "domain", "devices", "hostDevices"); found && len(hostDevs) > 0 {
+					isLiveMigratable = false
+				}
+
+				if !isLiveMigratable {
+					health.UnmigratableVMIs++
+					workloads.UnmigratableVMIs++
+				} else {
 					workloads.LiveMigratableVMIs++
 				}
 			}
