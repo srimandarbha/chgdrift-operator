@@ -15,16 +15,20 @@ import (
 type SemanticNodeType string
 
 const (
-	NodeTypeMachineConfig  SemanticNodeType = "MachineConfig"
-	NodeTypeRenderedConfig SemanticNodeType = "RenderedConfig"
-	NodeTypeMCP           SemanticNodeType = "MachineConfigPool"
-	NodeTypeMCD           SemanticNodeType = "MachineConfigDaemon"
-	NodeTypeNodeReady     SemanticNodeType = "NodeReady"
-	NodeTypeCRIO          SemanticNodeType = "CRIO"
-	NodeTypeKubelet       SemanticNodeType = "Kubelet"
-	NodeTypeVirtHandler   SemanticNodeType = "VirtHandler"
-	NodeTypeKubeVirt      SemanticNodeType = "KubeVirt"
-	NodeTypeVMIMigration  SemanticNodeType = "VirtualMachineInstanceMigration"
+	NodeTypeMachineConfig    SemanticNodeType = "MachineConfig"
+	NodeTypeRenderedConfig   SemanticNodeType = "RenderedConfig"
+	NodeTypeMCP             SemanticNodeType = "MachineConfigPool"
+	NodeTypeMCD             SemanticNodeType = "MachineConfigDaemon"
+	NodeTypeNodeReady       SemanticNodeType = "NodeReady"
+	NodeTypeCRIO            SemanticNodeType = "CRIO"
+	NodeTypeKubelet         SemanticNodeType = "Kubelet"
+	NodeTypeStorageOperator SemanticNodeType = "StorageOperator"
+	NodeTypeCSIDriver       SemanticNodeType = "CSIDriver"
+	NodeTypeOVNNetwork      SemanticNodeType = "OVNNetwork"
+	NodeTypeMultusNAD       SemanticNodeType = "MultusNAD"
+	NodeTypeVirtHandler     SemanticNodeType = "VirtHandler"
+	NodeTypeKubeVirt        SemanticNodeType = "KubeVirt"
+	NodeTypeVMIMigration    SemanticNodeType = "VirtualMachineInstanceMigration"
 )
 
 // ResourceNode represents a single component node in the typed maintenance causal dependency graph.
@@ -164,6 +168,48 @@ func NewTypedPlatformGraph() *DependencyGraph {
 		},
 	}
 
+	storageNode := &ResourceNode{
+		ID:           "storage/odf-operator",
+		SemanticType: NodeTypeStorageOperator,
+		Kind:         "StorageCluster",
+		Namespace:    "openshift-storage",
+		Name:         "ocs-storagecluster",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			return true, "Storage cluster operational", nil
+		},
+	}
+
+	csiNode := &ResourceNode{
+		ID:           "csi/ceph-csi",
+		SemanticType: NodeTypeCSIDriver,
+		Kind:         "CSIDriver",
+		Name:         "openshift-storage.ceph.fs.csi.ceph.com",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			return true, "CSI storage driver ready", nil
+		},
+	}
+
+	ovnNode := &ResourceNode{
+		ID:           "ovn/ovn-kubernetes",
+		SemanticType: NodeTypeOVNNetwork,
+		Kind:         "DaemonSet",
+		Namespace:    "openshift-ovn-kubernetes",
+		Name:         "ovn-kube-node",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			return true, "OVN-Kubernetes overlay network ready", nil
+		},
+	}
+
+	multusNode := &ResourceNode{
+		ID:           "network/multus-nad",
+		SemanticType: NodeTypeMultusNAD,
+		Kind:         "NetworkAttachmentDefinition",
+		Name:         "multus-nad",
+		Evaluator: func(ctx context.Context, c client.Client) (bool, string, error) {
+			return true, "Multus CNI attachment ready", nil
+		},
+	}
+
 	virtHandlerNode := &ResourceNode{
 		ID:           "daemonset/virt-handler",
 		SemanticType: NodeTypeVirtHandler,
@@ -245,13 +291,17 @@ func NewTypedPlatformGraph() *DependencyGraph {
 
 	// Establish Typed Causal Dependencies:
 	// MachineConfig -> RenderedConfig -> MCP -> MCD -> NodeReady -> CRIO -> Kubelet -> virt-handler -> KubeVirt -> VMIM
+	// StorageOperator -> CSIDriver -> virt-handler
+	// OVNNetwork -> MultusNAD -> virt-handler
 	renderedNode.Parents = []*ResourceNode{mcNode}
 	mcpNode.Parents = []*ResourceNode{renderedNode}
 	mcdNode.Parents = []*ResourceNode{mcpNode}
 	nodeReadyNode.Parents = []*ResourceNode{mcdNode}
 	crioNode.Parents = []*ResourceNode{nodeReadyNode}
 	kubeletNode.Parents = []*ResourceNode{crioNode}
-	virtHandlerNode.Parents = []*ResourceNode{kubeletNode}
+	csiNode.Parents = []*ResourceNode{storageNode}
+	multusNode.Parents = []*ResourceNode{ovnNode}
+	virtHandlerNode.Parents = []*ResourceNode{kubeletNode, csiNode, multusNode}
 	kubevirtNode.Parents = []*ResourceNode{virtHandlerNode}
 	vmimNode.Parents = []*ResourceNode{kubevirtNode}
 
@@ -262,6 +312,10 @@ func NewTypedPlatformGraph() *DependencyGraph {
 	g.Nodes[nodeReadyNode.ID] = nodeReadyNode
 	g.Nodes[crioNode.ID] = crioNode
 	g.Nodes[kubeletNode.ID] = kubeletNode
+	g.Nodes[storageNode.ID] = storageNode
+	g.Nodes[csiNode.ID] = csiNode
+	g.Nodes[ovnNode.ID] = ovnNode
+	g.Nodes[multusNode.ID] = multusNode
 	g.Nodes[virtHandlerNode.ID] = virtHandlerNode
 	g.Nodes[kubevirtNode.ID] = kubevirtNode
 	g.Nodes[vmimNode.ID] = vmimNode

@@ -52,13 +52,23 @@ func TestEvaluateCausalChain_ParentMCPUpdatingBlocksChild(t *testing.T) {
 
 func TestTypedPlatformGraph_NodeSemantics(t *testing.T) {
 	g := NewTypedPlatformGraph()
-	if len(g.Nodes) < 9 {
-		t.Fatalf("expected at least 9 semantic nodes in typed platform graph, got %d", len(g.Nodes))
+	if len(g.Nodes) < 13 {
+		t.Fatalf("expected at least 13 semantic nodes in typed platform graph, got %d", len(g.Nodes))
 	}
 
 	mcpNode, ok := g.Nodes["mcp/worker"]
 	if !ok || mcpNode.SemanticType != NodeTypeMCP {
 		t.Fatalf("expected MCP worker node with semantic type %s, got %+v", NodeTypeMCP, mcpNode)
+	}
+
+	csiNode, ok := g.Nodes["csi/ceph-csi"]
+	if !ok || csiNode.SemanticType != NodeTypeCSIDriver {
+		t.Fatalf("expected CSI driver node with semantic type %s, got %+v", NodeTypeCSIDriver, csiNode)
+	}
+
+	ovnNode, ok := g.Nodes["ovn/ovn-kubernetes"]
+	if !ok || ovnNode.SemanticType != NodeTypeOVNNetwork {
+		t.Fatalf("expected OVN node with semantic type %s, got %+v", NodeTypeOVNNetwork, ovnNode)
 	}
 
 	vmimNode, ok := g.Nodes["vmim/active-migrations"]
